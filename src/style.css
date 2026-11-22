@@ -3,7 +3,7 @@ body {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: #111d2c;
+  background: #151a4a;
   overscroll-behavior: none;
 }
 #stage {
@@ -24,33 +24,7 @@ body {
   inset: 0;
   display: grid;
   place-items: center;
-  color: #f3deae;
-  font: 700 48px 'Barlow Condensed', 'Arial Narrow', sans-serif;
+  color: #ffc53d;
+  font: 700 56px 'Barlow Condensed', 'Arial Narrow', sans-serif;
   letter-spacing: 0.08em;
-}
-/* Named controls mirrored over the painted interface: focusable, invisible,
-   pointer input passes through to the canvas. */
-.a11y-layer {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.a11y-layer button {
-  position: absolute;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: transparent;
-  pointer-events: none;
-  outline: none;
-  opacity: 0;
-}
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
 }

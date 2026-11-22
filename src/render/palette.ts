@@ -1,42 +1,41 @@
-// Matchbox-print palette. Ink and buff paper carry hierarchy; honey is
-// reserved for live fire and delivered light.
+// Cut-paper night palette: bright, saturated playfield; deep blue only behind it.
 export const C = {
-  ink: '#182638',
-  inkDeep: '#0d1724',
-  inkSoft: '#22364d',
-  petrol: '#355568',
-  petrolDeep: '#26404f',
-  teal: '#79A69D',
-  tealDeep: '#5a877f',
-  paper: '#F3DEAE',
-  paperShade: '#dcc28c',
-  paperDeep: '#b89a63',
-  vermilion: '#D85D44',
-  vermilionDeep: '#a9412f',
-  honey: '#FFD16C',
-  honeyHot: '#fff1c4',
-  brass: '#c9a457',
-  brassDeep: '#8a6d33',
-  brassGlint: '#fff3cf',
-  rubber: '#1d2330',
-  wood: '#4a3a33',
-  woodDeep: '#33282a',
-  blue: '#3e7bd6',
-  chalk: '#f6f0e2',
-} as const;
+  ink: '#1a1233',
+  inkSoft: '#2c2152',
+  paper: '#fff1cf',
+  paperShade: '#f3d9a4',
+  kraft: '#ef9a5b',
+  kraftDark: '#d9773f',
+  kraftDeep: '#a9503a',
+  red: '#e8503a',
+  redDark: '#b8352a',
+  mustard: '#ffc53d',
+  mustardDark: '#e59a1f',
+  teal: '#2fb3a0',
+  tealDark: '#1f7f78',
+  blue: '#4a6cf0',
+  blueDark: '#2f45b0',
+  pink: '#ff7aa8',
+  green: '#59c06b',
+  greenDark: '#2f8a4a',
+  cream: '#fff8e6',
+  white: '#ffffff',
+  fire: '#ffd23f',
+  fireHot: '#fff3a8',
+  fireOrange: '#ff8a1f',
+  fireRed: '#f2462b',
+  skyTop: '#151a4a',
+  skyMid: '#2c2f7a',
+  skyLow: '#6a3f8f',
+  skyGlow: '#d4688a',
+  wall: '#252a66',
+  wallLit: '#2e347a',
+  far: '#3b2f78',
+  glass: 'rgba(200,235,255,0.35)',
+};
 
-export const FONT_STAMP = '"Barlow Condensed", "Arial Narrow", sans-serif';
-export const FONT_TEXT = '"Source Sans 3", "Segoe UI", sans-serif';
+export const BOOK_TONES = ['#e8503a', '#2fb3a0', '#ffc53d', '#4a6cf0', '#ff7aa8', '#59c06b', '#9b6cf0', '#ff8a1f'];
+export const STAMP_INKS = ['#e8503a', '#2f6fd6', '#1f9a7a', '#a24fd1', '#e5871f'];
 
-/** Shared text sizes (logical px). */
-export const TYPE = {
-  hint: 18,
-  body: 16,
-  count: 14,
-  tag: 15,
-  stamp: 22,
-  title: 30,
-} as const;
-
-/** Shared edge inset (logical px). */
-export const INSET = 18;
+export const FONT = '"Barlow Condensed", "Arial Narrow", sans-serif';
+export const BODY = '"Source Sans 3", "Segoe UI", sans-serif';

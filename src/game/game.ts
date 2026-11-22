@@ -1,2115 +1,1430 @@
-// WICKSHIFT: one full-viewport stage. Build, Scout, Run, Result and Routes each
-// accept their own actions; Pause keeps the mode underneath it.
-import { CHASSIS, PARTS, type PartKind } from '../data/parts';
-import { ROUTES } from '../data/routes';
-import type { RouteDef } from '../data/routeTypes';
-import { FixedStepper } from '../core/clock';
-import { apply, clamp, compose, invApply, lerp, type Xf } from '../core/geom';
-import {
-  allSockets,
-  checkLaunch,
-  descendants,
-  findPlacement,
-  layout as bpLayout,
-  proposeFit,
-  removeBranch,
-  rotatePlacement,
-  type Blueprint,
-  type FitResult,
-  type SocketRef,
-} from '../workshop/blueprint';
-import { Workshop, type WorkshopSnapshot } from '../workshop/workshop';
-import { massInfo, type MassInfo } from '../sim/cart';
-import { Sim, type SimEvent } from '../sim/sim';
-import { benchPose } from '../sim/seat';
-import { audio } from '../audio/audio';
-import { SaveStore } from '../save';
-import { Camera, benchView } from '../render/camera';
-import { C, FONT_STAMP, FONT_TEXT, TYPE } from '../render/palette';
-import { FX, hatchedCross, printed, roughRect } from '../render/paint';
-import { drawPart } from '../render/partsArt';
-import { drawMoth, type MothPose } from '../render/moth';
-import { buildBackdrop, drawBackdrop, drawVignette, drawChock, drawClamp, drawCounterBack, drawCounterFront, drawFlap, drawRoller, drawSeesaw, drawTerrain, drawWindowBack, type Backdrop } from '../render/scene';
-import { drawCart, frameFromBench, frameFromSim, lerpXf, snapSim, type CartFrame, type SimSnap } from '../render/cartView';
-import type * as planck from 'planck';
-import { A11yLayer, type Control } from './a11y';
-import { computeLayout, inRect, type Layout, type Rect } from './layout';
-import {
-  drawChalkTick,
-  drawDial,
-  drawDrawer,
-  drawDrive,
-  drawLampControls,
-  drawLever,
-  drawPlumb,
-  drawSlip,
-  drawTab,
-  focusRing,
-  paperNote,
-  trayOrigin,
-  wrapText,
-} from './hud';
-import { drawPauseSlip, drawRoutes, pauseControls, routesControls, type RoutesUi } from './menus';
+// The night: title → shift → results → counter (shop) → next shift ... → dawn.
+import { Shift, targetFor, ruleFor, SHIFTS, RULE_TEXT, type ShiftEvent } from '../sim/shift';
+import { STAMPS, PARTS, MAX_STAMPS, BASE_TOLERANCE, type StampId, type PartId } from '../sim/rules';
+import { TICK } from '../sim/rng';
+import { newRun, wages, rollOffers, priceOf, rerollCost, buyOffer, type Run, type Offer } from '../sim/night';
+import type { Pose } from '../sim/sim';
+import { groundAt, type WindowSpot } from '../sim/terrain';
+import { WorldArt, worldTransform, toScreen, type Cam } from '../render/world';
+import { drawCartBody, drawWheel, drawStrut, drawLetter, drawHouse, drawFlame, rr, inked, type CartLook } from '../render/art';
+import { C, BODY } from '../render/palette';
+import { panel, button, text, wrapText, fmt, inside, coin, drawStamp, drawTag, logo, type Rect } from '../render/ui';
+import { Fx } from './fx';
+import { Input } from './input';
+import { sfx } from '../audio/sfx';
+import { loadSave, writeSave, type Save } from './save';
+import { botInput } from '../sim/bot';
 
-export type Mode = 'bench' | 'scout' | 'run' | 'result' | 'routes';
-type Device = 'keyboard' | 'mouse' | 'touch';
+type Mode = 'title' | 'intro' | 'drive' | 'results' | 'shop' | 'over' | 'dawn';
 
-interface Selection {
-  kind: PartKind;
-  from: 'tray' | 'mounted';
-  id?: string;
-  rot?: number;
-}
-
-interface Drag extends Selection {
-  pointerId: number;
-  active: boolean;
-  startX: number;
-  startY: number;
-  x: number;
-  y: number;
-  /** grab point in part-local metres */
-  grab: [number, number];
-  grow: number;
-}
-
-interface Target {
-  ref: SocketRef;
-  res: FitResult;
-  x: number;
-  y: number;
-}
-
-interface Fx {
-  kind: 'dust' | 'shard' | 'ring' | 'reject' | 'glint';
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
+interface PostSeq {
   t: number;
-  dur: number;
-  size: number;
-  text?: string;
+  w: WindowSpot;
+  fromX: number;
+  fromY: number;
+  heat: number;
+  sparks: number;
+  value: number;
+  parts: string[];
+  shown: number;
+  sparkI: number;
+  partI: number;
+  landed: boolean;
+  bell: boolean;
+  /** 0..1 while the total flies up to the meter. */
+  fly: number;
 }
 
-interface BenchRig {
-  padX: number;
-  padY: number;
-  postX: number;
-  chockX: number;
-  mothX: number;
+interface Hit {
+  r: Rect;
+  id: string;
 }
 
-interface HoldControl extends Control {
-  hold?: { down: () => void; up: () => void };
-}
+const AXLE_R = { x: -0.68, y: -0.28 };
+const AXLE_F = { x: 0.7, y: -0.28 };
 
-const ease = (t: number) => 1 - Math.pow(1 - clamp(t, 0, 1), 3);
-const easeBack = (t: number) => {
-  const c = 1.7;
-  const x = clamp(t, 0, 1) - 1;
-  return 1 + (c + 1) * x * x * x + c * x * x;
-};
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+/** Per-frame smoothing factor tuned at 60 Hz, corrected for the real frame time. */
+const ease = (k60: number, dt: number) => 1 - Math.pow(1 - k60, dt * 60);
+const lerpPose = (a: Pose, b: Pose, t: number): Pose => ({ x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t), a: lerp(a.a, b.a, t) });
 
 export class Game {
-  readonly canvas: HTMLCanvasElement;
-  readonly ctx: CanvasRenderingContext2D;
-  readonly a11y: A11yLayer;
-  readonly save = new SaveStore();
-  L!: Layout;
-  cam = new Camera();
-  backdrop: Backdrop | null = null;
-  stepper = new FixedStepper();
-
-  route: RouteDef = ROUTES[0]!;
-  ws!: Workshop;
-  mode: Mode = 'bench';
-  paused = false;
-  device: Device = 'mouse';
-  keyboardFocus = false;
-  time = 0;
-  private lastNow = 0;
-  frameCount = 0;
-  loops = 0;
-
-  // ---- bench
-  pose: Xf = { x: 0, y: 0, a: 0 };
-  private poseFrom: Xf | null = null;
-  private poseT = 1;
-  legal = false;
-  com: MassInfo = { mass: 1, cx: 0, cy: 0 };
-  proposedCom: MassInfo | null = null;
-  sel: Selection | null = null;
-  drag: Drag | null = null;
-  target: Target | null = null;
-  private targets: Target[] = [];
-  private targetsKey = '';
-  private fitSettle = new Map<string, number>();
-  private rejectAt: { x: number; y: number; t: number; reason: string } | null = null;
-  private leverNote = 0;
-  private leverRattle = 0;
-  private leverFree = 0;
-  private wasLegal = false;
-  private trayLift: Partial<Record<PartKind, number>> = {};
-  private benchCam = { cx: 0, cy: 0, ppm: 90 };
-  private peek = false;
-  private peekT = 0;
-  private scoutCam = { cx: 0, cy: 0, ppm: 60 };
-  private pan: { id: number; x: number; y: number; cx: number; cy: number } | null = null;
-  /** Hint flags (retired after use). */
-  hints = { drive: false, shift: false };
-  private shiftHintActive = false;
-  private everFitKey = false;
-
-  // ---- run
-  sim: Sim | null = null;
-  private prev: SimSnap | null = null;
-  private cur: SimSnap | null = null;
-  private alpha = 1;
-  private preRun: WorkshopSnapshot | null = null;
-  private runBp: Blueprint | null = null;
-  epoch = 0;
-  runT = 0;
-  private keys = new Set<string>();
-  driveLatched = false;
-  private touchDrive = new Set<number>();
-  private lampHold = { back: new Set<number>(), fwd: new Set<number>() };
-  private drawerRetract = 0;
-  private clampOpen = 0;
-  private clampAnchor: BenchRig | null = null;
-  private mothFrom: MothPose = 'brace';
-  private mothPose: MothPose = 'brace';
-  private mothT = 1;
-  private mothHop = 1;
-  private hopFrom = { x: 0, y: 0 };
-  private camVel = 0;
-  private lean = 0;
-  private lastLampVx = 0;
-  private shake = 0;
-  private stopGlint = 0;
-  private stopSide = 0;
-  private ember = 0;
-  private wickT = 0;
-  chalk: { x: number; y: number } | null = null;
-  private stripePart: string | null = null;
-  private fx: Fx[] = [];
-
-  // ---- result
-  result: { kind: 'delivered' | 'failed' | 'rest'; text: string; t: number; mark: boolean; at: { x: number; y: number } | null; firstDelivery: boolean } | null = null;
-  private stampT = 0;
-  private markT = 0;
-  private windowLit = new Map<string, number>();
-
-  // ---- menus
-  routesUi: RoutesUi = { selected: 0, t: 0, finale: false };
-  private resumeFocus: string | null = null;
-  pauseT = 0;
-  private saveNote = 0;
-
-  // ---- frame
-  private controls: HoldControl[] = [];
-  hover: string | null = null;
-  pressed: string | null = null;
-  pointer = { x: -1, y: -1 };
-
-  constructor(canvas: HTMLCanvasElement, host: HTMLElement) {
-    this.canvas = canvas;
-    this.ctx = canvas.getContext('2d', { alpha: false })!;
-    this.a11y = new A11yLayer(host);
-    this.a11y.onFocusChange = () => undefined;
-    const st = this.save.data.settings;
-    const sys = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
-    FX.reducedMotion = st.reducedMotion ?? sys;
-    audio.sfxLevel = st.sfx;
-    audio.musicLevel = st.music;
-    audio.muted = st.muted;
-    if (!this.save.storageOk) this.saveNote = 6;
-    const last = ROUTES.find((r) => r.id === this.save.data.lastRoute) ?? ROUTES[0]!;
-    this.loadRoute(this.save.isUnlocked(last.index) ? last : ROUTES[0]!, false);
-    this.bind();
-    this.resize();
-  }
-
-  // =============================================================== setup
-
-  loadRoute(route: RouteDef, announce = true): void {
-    this.disposeRun();
-    this.route = route;
-    this.ws = new Workshop(route, this.save.data.builds[route.id]);
-    this.mode = 'bench';
-    this.sel = null;
-    this.drag = null;
-    this.target = null;
-    this.chalk = null;
-    this.result = null;
-    this.stripePart = null;
-    this.poseT = 1;
-    this.poseFrom = null;
-    this.drawerRetract = 0;
-    this.clampOpen = 0;
-    this.clampAnchor = null;
-    this.save.data.lastRoute = route.id;
-    this.save.scheduleSave();
-    if (this.L) this.L = computeLayout(this.L.cssW, this.L.cssH, window.devicePixelRatio, route.kit);
-    this.refreshBench(false);
-    this.wasLegal = this.legal;
-    this.setMoth(this.legal ? 'stand' : 'brace', true);
-    this.mothHop = 1;
-    if (this.L) this.placeBenchCamera();
-    if (announce) this.a11y.announce(`Job ${route.index + 1}, ${route.name}. ${this.route.mark.name}: ${this.route.mark.condition}.`);
-  }
-
-  private placeBenchCamera(): void {
-    this.benchCam = benchView(this.L.W, this.L.H, this.route.start.x, this.route.start.groundY);
-    this.cam.set(this.benchCam);
-    this.cam.W = this.L.W;
-    this.cam.H = this.L.H;
-  }
-
-  resize(): void {
-    const cssW = Math.max(320, window.innerWidth || 0);
-    const cssH = Math.max(180, window.innerHeight || 0);
-    this.L = computeLayout(cssW, cssH, window.devicePixelRatio, this.route.kit);
-    const { dpr } = this.L;
-    this.canvas.width = Math.round(cssW * dpr);
-    this.canvas.height = Math.round(cssH * dpr);
-    this.canvas.style.width = `${cssW}px`;
-    this.canvas.style.height = `${cssH}px`;
-    this.cam.W = this.L.W;
-    this.cam.H = this.L.H;
-    const res = dpr * this.L.s;
-    this.backdrop = buildBackdrop(this.L.W, this.L.H, Math.min(2, res));
-    const wasBench = this.mode === 'bench' && !this.peek;
-    this.benchCam = benchView(this.L.W, this.L.H, this.route.start.x, this.route.start.groundY);
-    if (wasBench) this.cam.set(this.benchCam);
-
-  }
-
-  private res(): number {
-    return this.L.dpr * this.L.s;
-  }
-
-  // =============================================================== bench
-
-  refreshBench(animate: boolean): void {
-    const bp = this.ws.bp;
-    const chk = checkLaunch(bp, this.route.kit);
-    const next = benchPose(bp, this.route);
-    if (animate && !FX.reducedMotion) {
-      this.poseFrom = this.displayPose();
-      this.poseT = 0;
-    } else {
-      this.poseT = 1;
-      this.poseFrom = null;
-    }
-    this.pose = next;
-    this.legal = chk.ok;
-    this.com = massInfo(bp, this.route.lampStart);
-    if (this.legal && !this.wasLegal) {
-      this.leverFree = 1;
-      this.setMoth('stand');
-    } else if (!this.legal && this.wasLegal) this.setMoth('brace');
-    this.wasLegal = this.legal;
-    this.targetsKey = '';
-
-  }
-
-  displayPose(): Xf {
-    if (!this.poseFrom || this.poseT >= 1) return this.pose;
-    const t = easeBack(this.poseT);
-    return { x: lerp(this.poseFrom.x, this.pose.x, t), y: lerp(this.poseFrom.y, this.pose.y, t), a: lerp(this.poseFrom.a, this.pose.a, t) };
-  }
-
-  private benchFrame(): CartFrame {
-    return frameFromBench(this.ws.bp, this.displayPose(), this.route.lampStart);
-  }
-
-  /** Sockets (world positions) for placing `kind`, with full validation of each. */
-  private computeTargets(kind: PartKind, movingId: string | undefined, rot: number | undefined): Target[] {
-    const key = `${kind}|${movingId ?? ''}|${rot ?? ''}|${JSON.stringify(this.ws.bp.placements)}|${this.poseT >= 1}`;
-    if (key === this.targetsKey) return this.targets;
-    const bp = this.ws.bp;
-    const branch = movingId ? new Set([movingId, ...descendants(bp, movingId)]) : new Set<string>();
-    const pose = this.pose;
-    const out: Target[] = [];
-    for (const s of allSockets(bp)) {
-      if (branch.has(s.parent)) continue;
-      if (s.occupant && s.occupant !== movingId) continue;
-      const res = proposeFit(bp, this.route.kit, kind, s, { movingId, rot });
-      const [x, y] = apply(pose, [s.x, s.y]);
-      out.push({ ref: { parent: s.parent, socket: s.socket }, res, x, y });
-    }
-    this.targets = out;
-    this.targetsKey = key;
-    return out;
-  }
-
-  private nearestTarget(wx: number, wy: number, kind: PartKind, movingId?: string, rot?: number): Target | null {
-    let best: Target | null = null;
-    let bd = 0.62;
-    for (const t of this.computeTargets(kind, movingId, rot)) {
-      if (movingId) {
-        const p = findPlacement(this.ws.bp, movingId);
-        if (p && p.parent === t.ref.parent && p.socket === t.ref.socket) {
-          // its own socket: allowed (a no-op move)
-        }
-      }
-      const d = Math.hypot(t.x - wx, t.y - wy);
-      if (d < bd) {
-        bd = d;
-        best = t;
-      }
-    }
-    return best;
-  }
-
-  private commitFit(res: FitResult & { ok: true }, at: { x: number; y: number }): void {
-    this.ws.commit(res.bp);
-    this.fitSettle.set(res.placement.id, 0);
-    audio.fit();
-    if (res.placement.kind === 'keyWheel') this.everFitKey = true;
-    this.spawnRing(at.x, at.y);
-    this.afterEdit();
-  }
-
-  private reject(reason: string, x: number, y: number): void {
-    audio.reject();
-    this.rejectAt = { x, y, t: 0, reason };
-    this.a11y.announce(reason);
-  }
-
-  private afterEdit(): void {
-    this.sel = null;
-    this.target = null;
-    this.proposedCom = null;
-    this.refreshBench(true);
-    this.save.data.builds[this.route.id] = this.ws.bp;
-    this.save.scheduleSave();
-  }
-
-  private undo(): void {
-    if (this.mode !== 'bench' || !this.ws.undo()) return;
-    audio.uiClick();
-    this.afterEdit();
-  }
-  private redo(): void {
-    if (this.mode !== 'bench' || !this.ws.redo()) return;
-    audio.uiClick();
-    this.afterEdit();
-  }
-
-  private removeSelected(): void {
-    if (this.mode !== 'bench' || !this.sel || this.sel.from !== 'mounted' || !this.sel.id) return;
-    const next = removeBranch(this.ws.bp, this.sel.id);
-    this.ws.commit(next);
-    audio.stow();
-    this.afterEdit();
-  }
-
-  private rotate(dir: 1 | -1): void {
-    if (this.mode !== 'bench') return;
-    if (this.drag && this.drag.active) {
-      const n = PARTS[this.drag.kind].rotations.length;
-      if (n < 2) return;
-      // Start from the orientation the player currently sees, then step (wrapping).
-      const res = this.target?.res;
-      const seen = res && res.ok ? res.placement.rot : this.drag.kind === 'spar' ? 1 : 0;
-      const base = this.drag.rot ?? seen;
-      this.drag.rot = (base + dir + n) % n;
-      this.targetsKey = '';
-      audio.uiClick();
-      return;
-    }
-    if (this.sel?.from === 'mounted' && this.sel.id) {
-      const res = rotatePlacement(this.ws.bp, this.sel.id, dir);
-      const id = this.sel.id;
-      if (res.ok) {
-        this.ws.commit(res.bp);
-        audio.fit();
-        this.afterEdit();
-        this.sel = { kind: res.placement.kind, from: 'mounted', id };
-      } else {
-        const p = findPlacement(this.ws.bp, id);
-        const lp = p ? bpLayout(this.ws.bp).get(id) : null;
-        const w = lp ? apply(this.pose, [lp.xf.x, lp.xf.y]) : [0, 0];
-        this.reject(res.reason, w[0]!, w[1]!);
-      }
-    } else if (this.sel?.from === 'tray' && PARTS[this.sel.kind].rotations.length > 1) {
-      const n = PARTS[this.sel.kind].rotations.length;
-      this.sel.rot = ((this.sel.rot ?? (this.sel.kind === 'spar' ? 1 : 0)) + dir + n) % n;
-      this.targetsKey = '';
-      audio.uiClick();
-    }
-  }
-
-  selectTray(kind: PartKind): void {
-    if (this.mode !== 'bench') return;
-    if (this.ws.stock()[kind] <= 0) {
-      audio.reject();
-      return;
-    }
-    if (this.sel?.from === 'tray' && this.sel.kind === kind) {
-      this.sel = null;
-      return;
-    }
-    this.sel = { kind, from: 'tray' };
-    this.trayLift[kind] = 1;
-    audio.pickup(kind);
-    this.targetsKey = '';
-    this.a11y.announce(`${PARTS[kind].label} picked up. ${PARTS[kind].blurb}`);
-    if (this.device === 'keyboard') {
-      // Move keyboard focus to the first socket that accepts it.
-      window.setTimeout(() => {
-        const t = this.computeTargets(kind, undefined, undefined).find((x) => x.res.ok);
-        if (t) this.a11y.focus(`socket:${t.ref.parent}:${t.ref.socket}`);
-      }, 0);
-    }
-  }
-
-  selectMounted(id: string): void {
-    const p = findPlacement(this.ws.bp, id);
-    if (!p) return;
-    if (this.sel?.id === id) {
-      this.sel = null;
-      return;
-    }
-    this.sel = { kind: p.kind, from: 'mounted', id };
-    audio.pickup(p.kind);
-    this.targetsKey = '';
-    this.a11y.announce(`${PARTS[p.kind].label} selected. Choose a socket, press Delete to remove${PARTS[p.kind].rotations.length > 1 ? ', Q or E to rotate' : ''}.`);
-  }
-
-  /** Place the current selection at a socket (click or keyboard). */
-  placeSelection(ref: SocketRef): void {
-    if (!this.sel || this.mode !== 'bench') return;
-    const res = proposeFit(this.ws.bp, this.route.kit, this.sel.kind, ref, { movingId: this.sel.id, rot: this.sel.rot });
-    const t = this.computeTargets(this.sel.kind, this.sel.id, this.sel.rot).find((x) => x.ref.parent === ref.parent && x.ref.socket === ref.socket);
-    const at = t ? { x: t.x, y: t.y } : { x: this.pose.x, y: this.pose.y };
-    if (res.ok) {
-      const from = this.sel;
-      this.commitFit(res, at);
-      if (from.from === 'tray') this.trayLift[from.kind] = 0;
-    } else this.reject(res.reason, at.x, at.y);
-  }
-
-  // ============================================================ dispatch
-
-  dispatch(): void {
-    if (this.mode !== 'bench' || this.paused) return;
-    const chk = checkLaunch(this.ws.bp, this.route.kit);
-    if (!chk.ok) {
-      this.leverRattle = 1;
-      this.leverNote = 3;
-      audio.reject();
-      this.a11y.announce(`Dispatch is locked: ${chk.missing}.`);
-      return;
-    }
-    audio.latch();
-    audio.setAmbience(0.012);
-    this.cancelDrag();
-    this.sel = null;
-    this.target = null;
-    this.peek = false;
-    this.cam.set(this.benchCam);
-    this.preRun = this.ws.snapshot();
-    this.runBp = this.ws.bp;
-    this.epoch++;
-    audio.epoch = this.epoch;
-    const pose = this.pose;
-    this.poseT = 1;
-    this.sim = new Sim(this.route, this.ws.bp, pose, this.route.lampStart);
-    this.prev = snapSim(this.sim);
-    this.cur = this.prev;
-    this.alpha = 1;
-    this.mode = 'run';
-    this.runT = 0;
-    this.result = null;
-    this.stripePart = null;
-    this.ember = 0;
-    this.wickT = 0;
-    this.stampT = 0;
-    this.markT = 0;
-    this.lean = 0;
-    this.lastLampVx = 0;
-    this.shiftHintActive = false;
-    this.driveLatched = false;
-    this.touchDrive.clear();
-    this.lampHold.back.clear();
-    this.lampHold.fwd.clear();
-    this.fx = [];
-    // The clamp and chock stay in the world where the bench was.
-    this.hopFrom = this.mothBenchSpot();
-    this.clampAnchor = this.benchRig(pose);
-    this.mothHop = FX.reducedMotion ? 1 : 0;
-    this.setMoth('ride', FX.reducedMotion);
-    this.save.data.builds[this.route.id] = this.ws.bp;
-    this.save.scheduleSave();
-
-    // Retire drawer tab stops and move focus to a driving control.
-    window.setTimeout(() => {
-      if (this.mode === 'run' && this.a11y.focused() === null && this.device === 'keyboard') this.a11y.focus('drive');
-      else if (this.mode === 'run' && this.a11y.focused()?.startsWith('tray')) this.a11y.focus('drive');
-    }, 0);
-  }
-
-  private disposeRun(): void {
-    if (this.sim) {
-      this.sim.dispose();
-      this.sim = null;
-    }
-    audio.cancelRun();
-    this.prev = this.cur = null;
-  }
-
-  /** R / Back to bench: exact pre-run build, history and full wind. */
-  backToBench(): void {
-    if (this.mode !== 'run' && this.mode !== 'result') return;
-    this.disposeRun();
-    audio.setAmbience(0.025);
-    if (this.preRun) this.ws.restore(this.preRun);
-    this.mode = 'bench';
-    this.result = null;
-    this.keys.clear();
-    this.driveLatched = false;
-    this.touchDrive.clear();
-    this.lampHold.back.clear();
-    this.lampHold.fwd.clear();
-    this.stripePart = null;
-    this.fx = [];
-    this.shake = 0;
-    this.clampOpen = 0;
-    this.clampAnchor = null;
-    this.drawerRetract = FX.reducedMotion ? 0 : 0.6;
-    this.refreshBench(false);
-    this.cam.set(this.benchCam);
-    this.setMoth(this.legal ? 'stand' : 'brace', true);
-    this.mothHop = 1;
-
-    window.setTimeout(() => {
-      const f = this.a11y.focused();
-      if (this.device === 'keyboard' && (!f || !this.a11y.has(f))) this.a11y.focus('lever');
-    }, 0);
-  }
-
-  runAgain(): void {
-    if (this.mode !== 'run' && this.mode !== 'result') return;
-    this.backToBench();
-    this.dispatch();
-  }
-
-  nextWindow(): void {
-    const next = ROUTES[this.route.index + 1];
-    if (next && this.save.isUnlocked(next.index)) {
-      this.loadRoute(next);
-    } else {
-      this.openRoutes(true);
-    }
-  }
-
-  // ================================================================ run
-
-  private runInput(): { drive: boolean; lamp: -1 | 0 | 1 } {
-    const drive = this.keys.has('Space') || this.driveLatched || this.touchDrive.size > 0;
-    const back = this.keys.has('KeyA') || this.keys.has('ArrowLeft') || this.lampHold.back.size > 0;
-    const fwd = this.keys.has('KeyD') || this.keys.has('ArrowRight') || this.lampHold.fwd.size > 0;
-    const lamp = (fwd ? 1 : 0) - (back ? 1 : 0);
-    return { drive, lamp: lamp as -1 | 0 | 1 };
-  }
-
-  private tick(): void {
-    const sim = this.sim;
-    if (!sim || sim.outcome !== 'running') return;
-    const input = this.runInput();
-    if (input.drive && !this.hints.drive && sim.tick > 12) this.hints.drive = true;
-    if (input.lamp > 0 && this.shiftHintActive) {
-      this.hints.shift = true;
-      this.shiftHintActive = false;
-    }
-    if (input.lamp !== 0 && sim.tick % 9 === 0) {
-      const tr = sim.rig.lampJoint.getJointTranslation();
-      const atEnd = input.lamp > 0 ? tr >= sim.rig.lampJoint.getUpperLimit() - 0.01 : tr <= sim.rig.lampJoint.getLowerLimit() + 0.01;
-      if (!atEnd) audio.slide();
-    }
-    this.prev = this.cur;
-    const ev = sim.step(input);
-    this.cur = snapSim(sim);
-    for (const e of ev) this.onSimEvent(e);
-    this.propCues(sim);
-  }
-
-  /** One-shot sounds for the route's moving props: the ruler going, the flap lifting. */
-  private cueState: { sim: Sim | null; tipped: boolean; lifted: boolean } = { sim: null, tipped: false, lifted: false };
-  private propCues(sim: Sim): void {
-    const c = this.cueState;
-    if (c.sim !== sim) Object.assign(c, { sim, tipped: false, lifted: false });
-    const ss = this.route.seesaw;
-    if (sim.seesaw && ss && !c.tipped && sim.seesaw.getAngle() < ss.angle0 - 0.04) {
-      c.tipped = true;
-      audio.creak();
-      this.a11y.announce('The ruler tips.');
-    }
-    if (sim.flap && !c.lifted && sim.flap.getAngle() > 0.08) {
-      c.lifted = true;
-      audio.rustle();
-    }
-  }
-
-  private onSimEvent(e: SimEvent): void {
-    const sim = this.sim!;
-    switch (e.type) {
-      case 'knock': {
-        if (e.kind === 'lamp') audio.strike(e.power * 0.6);
-        else if (e.kind === 'chassis' || e.kind === 'spar' || e.kind === 'fork' || e.kind === 'carrier') audio.strike(Math.min(4, e.power));
-        else audio.strike(Math.min(1.5, e.power * 0.4));
-        if (e.power > 1.2 && e.kind !== 'lamp') this.spawnDust(e.x, e.y, Math.min(1, e.power / 4));
-        break;
-      }
-      case 'crack': {
-        audio.crack();
-        this.spawnShards(sim.rig.lamp.getPosition().x, sim.rig.lamp.getPosition().y + 0.3, 6);
-        this.kick(0.6);
-        this.chalk = { x: e.x, y: e.y };
-        this.a11y.announce('The lamp glass cracked.');
-        break;
-      }
-      case 'snuff':
-        audio.puff();
-        this.chalk = { x: e.x, y: e.y };
-        this.kick(1);
-        this.finishFail(sim.failReason);
-        break;
-      case 'fall':
-        audio.puff();
-        this.chalk = sim.decisive ? { x: sim.decisive.x, y: sim.decisive.y } : null;
-        this.finishFail(sim.failReason);
-        break;
-      case 'deliver':
-        this.finishDeliver();
-        break;
-      case 'roller':
-        this.stripePart = e.part;
-        audio.ink();
-        this.a11y.announce('Blue ink from the high roller.');
-        break;
-      case 'endstop':
-        audio.endStop();
-        this.stopGlint = 1;
-        this.stopSide = e.side;
-        break;
-      case 'windOut':
-        audio.uiClick();
-        break;
-      case 'rest':
-        if (sim.outcome === 'running' && this.mode === 'run') {
-          this.result = { kind: 'rest', text: sim.describeRest(), t: 0, mark: false, at: null, firstDelivery: false };
-          this.a11y.announce(`${this.result.text}. Back to bench with R.`);
-        }
-        break;
-      case 'liftStart':
-        this.setMoth('reach');
-        if (this.route.id === 'ruler-rise' && !this.hints.shift && sim.chassisPose().x > 5.5) this.shiftHintActive = true;
-        break;
-      case 'liftEnd':
-        this.setMoth('ride');
-        break;
-    }
-  }
-
-  private finishFail(text: string): void {
-    this.mode = 'result';
-    this.result = { kind: 'failed', text, t: 0, mark: false, at: this.chalk, firstDelivery: false };
-    this.setMoth('hatCatch');
-    this.ember = 0;
-    this.a11y.announce(`${text}. Press R for the bench, or run again.`);
-  }
-
-  private markEarned(): boolean {
-    const sim = this.sim!;
-    switch (this.route.mark.id) {
-      case 'wind':
-        return sim.wind >= 0.25;
-      case 'short':
-        return !(this.runBp?.placements ?? []).some((p) => p.kind === 'spar');
-      case 'clear':
-        return sim.cracks === 0;
-      case 'blue':
-        return sim.rollerPart !== null;
-    }
-  }
-
-  private finishDeliver(): void {
-    const mark = this.markEarned();
-    const first = !this.save.data.delivered[this.route.id];
-    // Store progress before the stamp animation starts.
-    this.save.data.delivered[this.route.id] = true;
-    if (mark) this.save.data.marks[this.route.id] = true;
-    if (this.runBp) this.save.data.builds[this.route.id] = this.runBp;
-    this.save.flush();
-    this.mode = 'result';
-    this.result = { kind: 'delivered', text: '', t: 0, mark, at: null, firstDelivery: first };
-    this.wickT = 0;
-    audio.deliver(mark);
-    this.setMoth('tip');
-    if (first) this.windowLit.set(this.route.id, 0);
-    const next = ROUTES[this.route.index + 1];
-    this.a11y.announce(`Delivered to window ${this.route.index + 1}.${mark ? ` ${this.route.mark.name} earned.` : ''}${next ? ' Next window is open.' : ' The night shift is done.'}`);
-    window.setTimeout(() => {
-      if (this.mode === 'result' && this.device === 'keyboard') this.a11y.focus('act:next');
-    }, 0);
-  }
-
-  // =========================================================== camera
-
-  private updateRunCamera(dt: number, frame: CartFrame): void {
-    const sim = this.sim;
-    if (!sim) return;
-    const W = this.L.W;
-    const ppm = this.cam.ppm;
-    const v = sim.rig.chassis.getLinearVelocity();
-    // Lead by ~1/3 s of forward speed, capped at 15% of the width.
-    const capM = (W * 0.15) / ppm;
-    const leadTarget = this.mode === 'result' && this.result?.kind === 'delivered' ? 0 : clamp(v.x * 0.33, -capM, capM);
-    const k = 1 - Math.exp(-dt * 3.2);
-    this.camVel += (leadTarget - this.camVel) * k;
-    let tx = frame.chassis.x + this.camVel + (W / 2 - W * 0.34) / ppm;
-    // Vertical dead zone: only follow once the frame leaves a band.
-    const groundRef = this.cam.cy - (this.benchCam.cy - this.route.start.groundY);
-    let ty = this.cam.cy;
-    const dy = frame.chassis.y - 0.6 - groundRef;
-    const band = 0.9;
-    if (dy > band) ty = this.cam.cy + (dy - band);
-    if (dy < -band * 0.6) ty = this.cam.cy + (dy + band * 0.6);
-    // Frame the landing before the cart leaves the lip.
-    const land = this.route.landing;
-    if (land && frame.chassis.x > land.fromX && frame.chassis.x < land.toX) {
-      const t = clamp((frame.chassis.x - land.fromX) / 1.5, 0, 1);
-      const focusX = land.focus[0] - (W * 0.15) / ppm;
-      tx = lerp(tx, Math.max(tx, focusX), t);
-      ty = lerp(ty, Math.min(ty, land.focus[1] + 1.2), t * 0.7);
-    }
-    if (this.mode === 'result' && this.result?.kind === 'delivered') {
-      tx = lerp(tx, this.route.arch.x - 2.2, 0.6);
-    }
-    const kx = 1 - Math.exp(-dt * 6);
-    const ky = 1 - Math.exp(-dt * 3);
-    this.cam.cx += (tx - this.cam.cx) * kx;
-    this.cam.cy += (ty - this.cam.cy) * ky;
-  }
-
-  kick(amount: number): void {
-    if (!FX.shake || FX.reducedMotion) return;
-    this.shake = Math.max(this.shake, amount);
-  }
-
-  // ======================================================== moth poses
-
-  private setMoth(p: MothPose, instant = false): void {
-    if (this.mothPose === p) return;
-    this.mothFrom = this.mothPose;
-    this.mothPose = p;
-    this.mothT = instant || FX.reducedMotion ? 1 : 0;
-  }
-
-  private mothBenchSpot(): { x: number; y: number } {
-    return { x: this.benchRig(this.displayPose()).mothX, y: this.route.start.groundY };
-  }
-
-  /** Where the bench furniture stands for this build: clamp post, pad, chock, moth. */
-  private benchRig(pose: Xf): BenchRig {
-    let rear: number = -CHASSIS.halfLength;
-    let front: number = CHASSIS.halfLength;
-    for (const lp of bpLayout(this.ws.bp).values()) {
-      for (const s of lp.solids) {
-        if (s.type === 'circle') {
-          rear = Math.min(rear, s.x - s.r);
-          front = Math.max(front, s.x + s.r);
-        } else {
-          for (const q of s.pts) {
-            rear = Math.min(rear, q[0]);
-            front = Math.max(front, q[0]);
-          }
-        }
-      }
-    }
-    const [padX, padY] = apply(pose, [-1.06, CHASSIS.top]);
-    const postX = pose.x + rear - 0.75;
-    const mothX = postX - 0.7;
-    return { padX, padY, postX, chockX: pose.x + front + 0.1, mothX };
-  }
-
-  // ======================================================== effects
-
-  private spawnRing(x: number, y: number): void {
-    if (FX.reducedMotion) return;
-    this.fx.push({ kind: 'ring', x, y, vx: 0, vy: 0, t: 0, dur: 0.22, size: 0.12 });
-  }
-  private spawnDust(x: number, y: number, p: number): void {
-    if (FX.reducedMotion || !FX.decor) return;
-    for (let i = 0; i < 5; i++) {
-      const a = Math.PI * (0.15 + 0.7 * ((i + 0.5) / 5));
-      this.fx.push({ kind: 'dust', x, y, vx: Math.cos(a) * (0.6 + p), vy: Math.sin(a) * (0.5 + p * 0.6), t: 0, dur: 0.45, size: 0.03 + p * 0.03 });
-    }
-  }
-  private spawnShards(x: number, y: number, n: number): void {
-    if (FX.reducedMotion) return;
-    for (let i = 0; i < n; i++) {
-      const a = -Math.PI / 2 + (i / (n - 1) - 0.5) * 2.4;
-      this.fx.push({ kind: 'shard', x, y, vx: Math.cos(a) * 1.6, vy: -Math.sin(a) * 1.4 + 1.2, t: 0, dur: 0.6, size: 0.04 });
-    }
-  }
-
-  // ============================================================ routes
-
-  openRoutes(fromFinish = false): void {
-    if (this.drag) this.cancelDrag();
-    if (this.mode === 'run' || this.mode === 'result') {
-      this.disposeRun();
-      if (this.preRun) this.ws.restore(this.preRun);
-    }
-    this.paused = false;
-    this.mode = 'routes';
-    this.routesUi.t = 0;
-    this.routesUi.selected = this.route.index;
-    const allDone = ROUTES.every((r) => this.save.data.delivered[r.id]);
-    this.routesUi.finale = allDone;
-    if (fromFinish && allDone) this.routesUi.selected = 0;
-    this.a11y.announce(allDone ? 'All four windows are lit. Choose any window to reopen its bench.' : 'Routes. Choose a sorting window.');
-    window.setTimeout(() => this.a11y.focus(`route:${this.routesUi.selected}`), 0);
-  }
-
-  openRoute(index: number): void {
-    const r = ROUTES[index];
-    if (!r || !this.save.isUnlocked(index)) {
-      audio.reject();
-      return;
-    }
-    audio.latch();
-    this.loadRoute(r);
-    window.setTimeout(() => {
-      if (this.device === 'keyboard') this.a11y.focus('lever');
-    }, 0);
-  }
-
-  // ============================================================= pause
-
-  togglePause(): void {
-    if (this.mode === 'routes' && !this.paused) {
-      // From routes, pause still opens settings.
-    }
-    if (!this.paused) {
-      this.resumeFocus = this.a11y.focused();
-      this.paused = true;
-      this.pauseT = 0;
-      this.keys.clear();
-      this.touchDrive.clear();
-      this.lampHold.back.clear();
-      this.lampHold.fwd.clear();
-      this.cancelDrag();
-      this.a11y.announce('Paused.');
-      window.setTimeout(() => this.a11y.focus('pause:resume'), 0);
-    } else {
-      this.paused = false;
-      this.stepper.reset();
-      const f = this.resumeFocus;
-      window.setTimeout(() => {
-        if (f && this.a11y.has(f)) this.a11y.focus(f);
-        else (document.activeElement as HTMLElement | null)?.blur?.();
-      }, 0);
-    }
-
-  }
-
-  setReducedMotion(v: boolean): void {
-    FX.reducedMotion = v;
-    this.save.data.settings.reducedMotion = v;
-    this.save.scheduleSave();
-  }
-
-  setLevels(sfx: number, music: number, muted: boolean): void {
-    audio.sfxLevel = sfx;
-    audio.musicLevel = music;
-    audio.muted = muted;
-    audio.applyLevels();
-    this.save.data.settings.sfx = sfx;
-    this.save.data.settings.music = music;
-    this.save.data.settings.muted = muted;
-    this.save.scheduleSave();
-  }
-
-  toggleFullscreen(): void {
-    const d = document as Document & { webkitFullscreenElement?: Element };
-    if (document.fullscreenElement || d.webkitFullscreenElement) void document.exitFullscreen?.();
-    else void document.documentElement.requestFullscreen?.().catch(() => undefined);
-  }
-
-  // ============================================================= input
-
-  private bind(): void {
-    const c = this.canvas;
-    c.addEventListener('pointerdown', (e) => this.onDown(e));
-    c.addEventListener('pointermove', (e) => this.onMove(e));
-    c.addEventListener('pointerup', (e) => this.onUp(e));
-    c.addEventListener('pointercancel', (e) => this.onCancel(e));
-    c.addEventListener('lostpointercapture', (e) => this.onCancel(e, true));
-    c.addEventListener('contextmenu', (e) => e.preventDefault());
-    window.addEventListener('keydown', (e) => this.onKey(e, true));
-    window.addEventListener('keyup', (e) => this.onKey(e, false));
+  private ctx: CanvasRenderingContext2D;
+  private input: Input;
+  private fx = new Fx();
+  private mode: Mode = 'title';
+  private run!: Run;
+  shift!: Shift;
+  private art!: WorldArt;
+  private cam: Cam = { x: 0, y: 0, ppm: 60, W: 1280, H: 720, dpr: 1 };
+  private t = 0;
+  private acc = 0;
+  private last: number | null = null;
+  private paused = false;
+  private hits: Hit[] = [];
+  private posts: PostSeq[] = [];
+  private shownPosted = 0;
+  private meterBump = 0;
+  private offers: Offer[] = [];
+  private rerolls = 0;
+  private selected: { kind: 'own' | 'offer'; i: number } | null = null;
+  private modeT = 0;
+  private finishInfo: { posted: number; target: number; passed: boolean; earned: number; lines: [string, number][] } | null = null;
+  private hint: { id: string; text: string; t: number } | null = null;
+  private seenHints = new Set<string>();
+  private save: Save;
+  private mood = 0;
+  private blinkT = 0;
+  private sparkAngle = 0;
+  private lastLetterN = 0;
+  private flameShown = 0;
+  private pendingFinish = 0;
+  private dpr = 1;
+  /** Seconds since the previous rendered frame. */
+  private fdt = 1 / 60;
+  /** Dev only: let the test bot drive (set from the console as __ws.auto). */
+  auto = false;
+  private botMem = { flipTarget: null as number | null, a0: 0 };
+
+  constructor(private canvas: HTMLCanvasElement, stage: HTMLElement) {
+    this.ctx = canvas.getContext('2d')!;
+    this.input = new Input(stage);
+    this.save = loadSave();
+    sfx.setMuted(this.save.muted);
+    this.fx.reduced = this.save.reduced;
+    this.input.onFirstGesture = () => {
+      sfx.unlock();
+    };
     window.addEventListener('resize', () => this.resize());
-    window.addEventListener('blur', () => this.onBlur());
-    // A save still waiting on its short timer is written before the page goes away.
-    window.addEventListener('pagehide', () => this.save.flush());
     document.addEventListener('visibilitychange', () => {
-      audio.setHidden(document.hidden);
-      if (document.hidden) this.onBlur();
-      else this.stepper.reset();
+      sfx.suspend(document.hidden);
+      if (document.hidden && this.mode === 'drive') this.paused = true;
+      this.last = null;
     });
-    document.addEventListener('fullscreenchange', () => this.resize());
+    this.resize();
+    this.newRun();
+    this.mode = 'title';
   }
 
-  private onBlur(): void {
-    // Pause and clear held input; abandon any pending drag.
-    this.keys.clear();
-    this.touchDrive.clear();
-    this.lampHold.back.clear();
-    this.lampHold.fwd.clear();
-    this.cancelDrag();
-    this.pan = null;
-    this.peek = false;
-    if ((this.mode === 'run') && !this.paused && this.sim?.outcome === 'running') this.togglePause();
-    this.stepper.reset();
-  }
-
-  private toLogical(e: PointerEvent): { x: number; y: number } {
-    const r = this.canvas.getBoundingClientRect();
-    return { x: (e.clientX - r.left) / this.L.s, y: (e.clientY - r.top) / this.L.s };
-  }
-
-  private controlAt(x: number, y: number): HoldControl | null {
-    for (let i = this.controls.length - 1; i >= 0; i--) {
-      const c = this.controls[i]!;
-      if (c.id.startsWith('socket:') || c.id.startsWith('part:') || c.id.startsWith('tray:')) continue;
-      if (inRect(c.rect, x, y, 2)) return c;
-    }
-    return null;
-  }
-
-  private onDown(e: PointerEvent): void {
-    audio.unlock();
-    this.device = e.pointerType === 'touch' ? 'touch' : 'mouse';
-    this.keyboardFocus = false;
-    const p = this.toLogical(e);
-    this.pointer = p;
-    const ctl = this.controlAt(p.x, p.y);
-    if (ctl) {
-      if (!ctl.enabled) {
-        if (ctl.id === 'lever') this.dispatch();
-        else audio.reject();
-        return;
-      }
-      this.pressed = ctl.id;
-      if (ctl.hold) {
-        this.canvas.setPointerCapture(e.pointerId);
-        ctl.hold.down();
-        (this as unknown as { holdIds: Map<number, HoldControl> }).holdIds ??= new Map();
-        (this as unknown as { holdIds: Map<number, HoldControl> }).holdIds.set(e.pointerId, ctl);
-      } else {
-        // The lever moves on press; other controls act on press too (immediate binding).
-        ctl.onActivate();
-      }
-      e.preventDefault();
-      return;
-    }
-    if (this.paused) return;
-    if (this.mode === 'bench') this.benchDown(e, p);
-    else if (this.mode === 'scout') {
-      this.canvas.setPointerCapture(e.pointerId);
-      this.pan = { id: e.pointerId, x: p.x, y: p.y, cx: this.cam.cx, cy: this.cam.cy };
-    } else if (this.mode === 'routes') {
-      // Windows are controls; clicking empty space does nothing.
-    }
-  }
-
-  private benchDown(e: PointerEvent, p: { x: number; y: number }): void {
-    const wx = this.cam.wx(p.x);
-    const wy = this.cam.wy(p.y);
-    // Chalk tick: removable with a rub.
-    if (this.chalk && Math.hypot(this.cam.sx(this.chalk.x) - p.x, this.cam.sy(this.chalk.y) - p.y) < 16) {
-      this.chalk = null;
-      audio.stow();
-      return;
-    }
-    // Drawer recesses.
-    for (const { kind, r } of this.L.recesses) {
-      if (!inRect(r, p.x, p.y, 6)) continue;
-      if (this.ws.stock()[kind] <= 0) {
-        audio.reject();
-        return;
-      }
-      const [ox, oy] = trayOrigin(kind, r, this.L.trayK);
-      const k = this.L.trayK;
-      this.startDrag(e, { kind, from: 'tray' }, [(p.x - ox) / k, -(p.y - oy) / k]);
-      return;
-    }
-    // With a part in hand, a click on (or right by) a socket places it, even
-    // where that socket sits under a fitted wheel.
-    if (this.sel) {
-      const t = this.nearestTarget(wx, wy, this.sel.kind, this.sel.id, this.sel.rot);
-      if (t && Math.hypot(t.x - wx, t.y - wy) < 0.3) {
-        this.placeSelection(t.ref);
-        return;
-      }
-    }
-    // Mounted parts (nearest pick shape).
-    const frame = this.benchFrame();
-    let best: { id: string; kind: PartKind; d: number; local: [number, number] } | null = null;
-    for (const part of frame.parts) {
-      const def = PARTS[part.kind];
-      const [cx, cy] = apply(part.pose, [def.pick.x, def.pick.y]);
-      const d = Math.hypot(cx - wx, cy - wy);
-      if (d < def.pick.r && (!best || d < best.d)) {
-        const local = invApply(part.pose, [wx, wy]);
-        best = { id: part.id, kind: part.kind, d, local };
-      }
-    }
-    if (best) {
-      this.startDrag(e, { kind: best.kind, from: 'mounted', id: best.id }, best.local);
-      return;
-    }
-    // Click on a socket with a selection.
-    if (this.sel) {
-      const t = this.nearestTarget(wx, wy, this.sel.kind, this.sel.id, this.sel.rot);
-      if (t) {
-        this.placeSelection(t.ref);
-        return;
-      }
-      this.sel = null;
-    }
-  }
-
-  private startDrag(e: PointerEvent, s: Selection, grab: [number, number]): void {
-    const p = this.toLogical(e);
-    this.canvas.setPointerCapture(e.pointerId);
-    this.drag = { ...s, pointerId: e.pointerId, active: false, startX: p.x, startY: p.y, x: p.x, y: p.y, grab, grow: 0 };
-  }
-
-  private onMove(e: PointerEvent): void {
-    const p = this.toLogical(e);
-    this.pointer = p;
-    if (e.pointerType === 'mouse') {
-      const c = this.controlAt(p.x, p.y);
-      const h = c ? c.id : null;
-      if (h !== this.hover) {
-        this.hover = h;
-        this.canvas.style.cursor = c && c.enabled ? 'pointer' : 'default';
-      }
-    }
-    const d = this.drag;
-    if (d && d.pointerId === e.pointerId) {
-      d.x = p.x;
-      d.y = p.y;
-      if (!d.active && Math.hypot(p.x - d.startX, p.y - d.startY) > 5) {
-        d.active = true;
-        this.sel = null;
-        audio.pickup(d.kind);
-        if (d.from === 'tray') this.trayLift[d.kind] = 0;
-        this.targetsKey = '';
-      }
-      if (d.active) this.updateDragTarget();
-    }
-    if (this.pan && this.pan.id === e.pointerId) {
-      this.cam.cx = this.pan.cx - (p.x - this.pan.x) / this.cam.ppm;
-      this.cam.cy = this.pan.cy + (p.y - this.pan.y) / this.cam.ppm;
-      this.clampScout();
-    }
-  }
-
-  private dragOrigin(d: Drag): { x: number; y: number } {
-    const k = this.cam.ppm;
-    const wx = this.cam.wx(d.x) - d.grab[0] * (k / k);
-    // grab is in part-local metres; at world scale it maps 1:1 in metres.
-    return { x: wx - 0 * k, y: this.cam.wy(d.y) - d.grab[1] };
-  }
-
-  private updateDragTarget(): void {
-    const d = this.drag;
-    if (!d) return;
-    const o = this.dragOrigin(d);
-    const t = this.nearestTarget(o.x, o.y, d.kind, d.from === 'mounted' ? d.id : undefined, d.rot);
-    if (t?.ref.parent !== this.target?.ref.parent || t?.ref.socket !== this.target?.ref.socket || t?.res !== this.target?.res) {
-      this.target = t;
-      this.proposedCom = t && t.res.ok ? massInfo(t.res.bp, this.route.lampStart) : null;
-    }
-  }
-
-  private onUp(e: PointerEvent): void {
-    const holdIds = (this as unknown as { holdIds?: Map<number, HoldControl> }).holdIds;
-    const h = holdIds?.get(e.pointerId);
-    if (h) {
-      h.hold!.up();
-      holdIds!.delete(e.pointerId);
-    }
-    this.pressed = null;
-    if (this.pan && this.pan.id === e.pointerId) this.pan = null;
-    const d = this.drag;
-    if (!d || d.pointerId !== e.pointerId) return;
-    this.drag = null;
-    const p = this.toLogical(e);
-    if (!d.active) {
-      // A click: select (or deselect).
-      if (d.from === 'tray') this.selectTray(d.kind);
-      else if (d.id) this.selectMounted(d.id);
-      return;
-    }
-    const t = this.target;
-    this.target = null;
-    this.proposedCom = null;
-    const inside = p.x >= 0 && p.y >= 0 && p.x <= this.L.W && p.y <= this.L.H;
-    if (t && inside) {
-      if (t.res.ok) {
-        this.commitFit(t.res, t);
-        return;
-      }
-      this.reject(t.res.reason, t.x, t.y);
-      this.returnPiece(d);
-      return;
-    }
-    if (inside && d.from === 'mounted' && d.id && p.y > this.L.drawer.y - 10) {
-      // Dropped on the drawer: remove the branch as one undoable edit.
-      this.ws.commit(removeBranch(this.ws.bp, d.id));
-      audio.stow();
-      this.afterEdit();
-      return;
-    }
-    this.returnPiece(d);
-  }
-
-  private returnPiece(d: Drag): void {
-    audio.stow();
-    if (d.from === 'tray') this.trayLift[d.kind] = 0;
-    this.targetsKey = '';
-  }
-
-  private onCancel(e: PointerEvent, lost = false): void {
-    const holdIds = (this as unknown as { holdIds?: Map<number, HoldControl> }).holdIds;
-    const h = holdIds?.get(e.pointerId);
-    if (h) {
-      h.hold!.up();
-      holdIds!.delete(e.pointerId);
-    }
-    if (this.drag && this.drag.pointerId === e.pointerId && (!lost || this.drag)) {
-      // Abandon without changing stock or the build.
-      if (lost && !this.drag.active) return;
-      this.cancelDrag();
-    }
-    if (this.pan && this.pan.id === e.pointerId) this.pan = null;
-  }
-
-  cancelDrag(): void {
-    if (!this.drag) return;
-    const d = this.drag;
-    this.drag = null;
-    this.target = null;
-    this.proposedCom = null;
-    if (d.active) this.returnPiece(d);
-  }
-
-  private onKey(e: KeyboardEvent, down: boolean): void {
-    const code = e.code;
-    if (down) {
-      audio.unlock();
-      if (code === 'Tab' || code.startsWith('Arrow') || code === 'Enter') {
-        this.device = 'keyboard';
-        this.keyboardFocus = true;
-      } else if (['Space', 'KeyA', 'KeyD', 'KeyQ', 'KeyE', 'KeyR', 'KeyV'].includes(code)) this.device = 'keyboard';
-    }
-    if (code === 'Escape' && down) {
-      if (this.drag) this.cancelDrag();
-      else if (this.sel) {
-        this.sel = null;
-        this.a11y.announce('Selection cleared.');
-      } else if (this.mode === 'scout' && !this.paused) this.exitScout();
-      else this.togglePause();
-      e.preventDefault();
-      return;
-    }
-    if (this.paused) {
-      if (down && (code === 'ArrowUp' || code === 'ArrowDown')) {
-        this.a11y.moveInGroup(code === 'ArrowDown' ? 1 : -1);
-        e.preventDefault();
-      } else if (down && (code === 'ArrowLeft' || code === 'ArrowRight')) {
-        const f = this.a11y.focused();
-        const ctl = f ? this.controls.find((c) => c.id === f) : null;
-        if (ctl && (ctl as HoldControl & { adjust?: (d: number) => void }).adjust) {
-          (ctl as HoldControl & { adjust: (d: number) => void }).adjust(code === 'ArrowRight' ? 1 : -1);
-          e.preventDefault();
-        }
-      }
-      return;
-    }
-    const mod = e.ctrlKey || e.metaKey;
-    if (this.mode === 'run' || this.mode === 'result') {
-      if (['Space', 'KeyA', 'KeyD', 'ArrowLeft', 'ArrowRight'].includes(code)) {
-        e.preventDefault();
-        if (down) this.keys.add(code);
-        else this.keys.delete(code);
-        return;
-      }
-      if (code === 'KeyR' && down && !e.repeat) {
-        this.backToBench();
-        e.preventDefault();
-      }
-      return;
-    }
-    if (this.mode === 'bench') {
-      if (down && mod && code === 'KeyZ') {
-        if (e.shiftKey) this.redo();
-        else this.undo();
-        e.preventDefault();
-        return;
-      }
-      if (down && mod && code === 'KeyY') {
-        this.redo();
-        e.preventDefault();
-        return;
-      }
-      if (down && (code === 'KeyQ' || code === 'KeyE')) {
-        this.rotate(code === 'KeyE' ? -1 : 1);
-        e.preventDefault();
-        return;
-      }
-      if (down && (code === 'Delete' || code === 'Backspace')) {
-        this.removeSelected();
-        e.preventDefault();
-        return;
-      }
-      if (code === 'KeyV' && !mod) {
-        // Quick look at the next obstacle while the bench is idle.
-        if (down && !this.drag) this.peek = true;
-        if (!down) this.peek = false;
-        e.preventDefault();
-        return;
-      }
-      if (down && code.startsWith('Arrow')) {
-        const dir = code === 'ArrowRight' || code === 'ArrowDown' ? 1 : -1;
-        if (!this.a11y.moveInGroup(dir as 1 | -1)) {
-          if (!this.a11y.focused()) {
-            const first = this.controls.find((c) => c.group === 'tray' || c.group === 'socket');
-            if (first) this.a11y.focus(first.id);
-          }
-        }
-        e.preventDefault();
-      }
-      return;
-    }
-    if (this.mode === 'scout' && down && code.startsWith('Arrow')) {
-      const step = 1.2;
-      if (code === 'ArrowLeft') this.cam.cx -= step;
-      if (code === 'ArrowRight') this.cam.cx += step;
-      if (code === 'ArrowUp') this.cam.cy += step * 0.6;
-      if (code === 'ArrowDown') this.cam.cy -= step * 0.6;
-      this.clampScout();
-      e.preventDefault();
-    }
-    if (this.mode === 'routes' && down && code.startsWith('Arrow')) {
-      this.a11y.moveInGroup(code === 'ArrowRight' || code === 'ArrowDown' ? 1 : -1);
-      e.preventDefault();
-    }
-  }
-
-  // ============================================================ scout
-
-  enterScout(): void {
-    if (this.mode !== 'bench') return;
-    this.cancelDrag();
-    this.mode = 'scout';
-    const b = this.route.bounds;
-    const ppm = Math.min(70, (this.L.H - 120) / (b.y1 - b.y0));
-    this.scoutCam = { cx: this.cam.cx + 6, cy: (b.y0 + b.y1) / 2, ppm };
-    this.cam.set(this.scoutCam);
-    this.clampScout();
-    audio.uiClick();
-    this.a11y.announce('Scout: drag or use the arrow keys to look along the course. Escape returns to the bench.');
-    window.setTimeout(() => this.a11y.focus('scout:back'), 0);
-  }
-
-  exitScout(): void {
-    if (this.mode !== 'scout') return;
-    this.mode = 'bench';
-    this.pan = null;
-    // Exact bench camera, focus and selection are restored.
-    this.cam.set(this.benchCam);
-    audio.uiClick();
-    window.setTimeout(() => {
-      if (this.device === 'keyboard') this.a11y.focus('scout');
-    }, 0);
-  }
-
-  private clampScout(): void {
-    const b = this.route.bounds;
-    const halfW = this.L.W / 2 / this.cam.ppm;
-    const halfH = this.L.H / 2 / this.cam.ppm;
-    this.cam.cx = clamp(this.cam.cx, b.x0 + halfW * 0.6, Math.max(b.x0 + halfW * 0.6, b.x1 - halfW * 0.6));
-    this.cam.cy = clamp(this.cam.cy, b.y0 + halfH * 0.5, Math.max(b.y0 + halfH * 0.5, b.y1 - halfH * 0.4));
-  }
-
-  // ============================================================ loop
+  // ---------------------------------------------------------------- lifecycle
 
   start(): void {
-    const loop = (now: number) => {
+    const frame = (now: number) => {
       this.frame(now);
-      requestAnimationFrame(loop);
+      requestAnimationFrame(frame);
     };
-    this.loops++;
-    requestAnimationFrame(loop);
+    requestAnimationFrame(frame);
   }
 
-  frame(now: number): void {
-    const dt = this.lastNow ? Math.min(0.1, (now - this.lastNow) / 1000) : 1 / 60;
-    this.lastNow = now;
-    this.time += dt;
-    this.frameCount++;
-    const { steps, alpha } = this.stepper.advance(now);
-    if (!this.paused && this.sim && (this.mode === 'run' || this.mode === 'result')) {
-      for (let i = 0; i < steps; i++) this.tick();
-      this.alpha = alpha;
-    } else this.alpha = 1;
-    this.update(dt);
-    this.render();
-    audio.update();
-  }
-
-  private update(dt: number): void {
-    const rm = FX.reducedMotion;
-    const step = (v: number, dur: number) => (rm ? 1 : Math.min(1, v + dt / dur));
-    if (this.poseT < 1) this.poseT = step(this.poseT, 0.32);
-    this.mothT = step(this.mothT, 0.18);
-    if (this.mothHop < 1) this.mothHop = step(this.mothHop, 0.3);
-    for (const [id, t] of this.fitSettle) {
-      const n = t + dt / 0.12;
-      if (n >= 1 || rm) this.fitSettle.delete(id);
-      else this.fitSettle.set(id, n);
-    }
-    for (const k of Object.keys(this.trayLift) as PartKind[]) {
-      if (this.sel?.from === 'tray' && this.sel.kind === k) continue;
-      this.trayLift[k] = Math.max(0, (this.trayLift[k] ?? 0) - dt * 8);
-    }
-    if (this.rejectAt) {
-      this.rejectAt.t += dt;
-      if (this.rejectAt.t > 1.6) this.rejectAt = null;
-    }
-    this.leverRattle = Math.max(0, this.leverRattle - dt * 3);
-    this.leverNote = Math.max(0, this.leverNote - dt);
-    this.leverFree = Math.max(0, this.leverFree - dt * 1.5);
-    this.stopGlint = Math.max(0, this.stopGlint - dt * 4);
-    this.shake = Math.max(0, this.shake - dt * 4);
-    this.saveNote = Math.max(0, this.saveNote - dt);
-    if (this.drag) this.drag.grow = rm ? 1 : Math.min(1, this.drag.grow + dt / 0.1);
-    const running = this.mode === 'run' || this.mode === 'result';
-    this.drawerRetract = running ? step(this.drawerRetract, 0.26) : rm ? 0 : Math.max(0, this.drawerRetract - dt / 0.25);
-    this.clampOpen = running ? step(this.clampOpen, 0.22) : 0;
-    if (this.mode === 'run') this.runT += dt;
-    if (this.result) {
-      this.result.t += dt;
-      if (this.result.kind === 'delivered') {
-        const t = this.result.t;
-        this.wickT = rm ? 1 : clamp(t / 0.12, 0, 1);
-        const lit = rm || !this.result.firstDelivery ? 1 : clamp((t - 0.15) / 0.2, 0, 1);
-        this.windowLit.set(this.route.id, lit);
-        this.stampT = rm ? (t > 0.6 ? 1 : 0) : clamp((t - 0.6) / 0.16, 0, 1);
-        this.markT = this.result.mark ? (rm ? (t > 0.86 ? 1 : 0) : clamp((t - 0.86) / 0.16, 0, 1)) : 0;
-      }
-      if (this.result.kind === 'failed') this.ember = Math.min(1, this.ember + dt / 1.2);
-    }
-    if (this.paused) this.pauseT = step(this.pauseT, 0.18);
-    if (this.mode === 'routes') this.routesUi.t = step(this.routesUi.t, 0.4);
-    // Fx particles.
-    for (const f of this.fx) {
-      f.t += dt;
-      f.x += f.vx * dt;
-      f.y += f.vy * dt;
-      if (f.kind === 'shard') f.vy -= 6 * dt;
-      if (f.kind === 'dust') {
-        f.vx *= 0.9;
-        f.vy *= 0.9;
-      }
-    }
-    this.fx = this.fx.filter((f) => f.t < f.dur);
-    // Bench peek (hold V): ease toward the next obstacle, restore exactly.
-    if (this.mode === 'bench') {
-      const target = this.peek ? 1 : 0;
-      this.peekT = rm ? target : this.peekT + (target - this.peekT) * (1 - Math.exp(-dt * 8));
-      if (Math.abs(this.peekT - target) < 0.002) this.peekT = target;
-      if (this.peekT === 0) this.cam.set(this.benchCam);
-      else {
-        const pk = this.route.peek;
-        const pv = { cx: pk[0], cy: pk[1] + 0.8, ppm: this.benchCam.ppm };
-        this.cam.cx = lerp(this.benchCam.cx, pv.cx, this.peekT);
-        this.cam.cy = lerp(this.benchCam.cy, pv.cy, this.peekT);
-      }
+  /** Dev only: advance the game by `sec` seconds of 60 Hz frames synchronously. */
+  devRun(sec: number): void {
+    let now = performance.now();
+    this.last = now;
+    now += 1000 / 60;
+    for (let i = 0; i < Math.round(sec * 60); i++) {
+      this.frame(now);
+      now += 1000 / 60;
     }
   }
 
-  // ============================================================ render
+  private resize(): void {
+    this.dpr = Math.min(2, window.devicePixelRatio || 1);
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    this.canvas.width = Math.round(W * this.dpr);
+    this.canvas.height = Math.round(H * this.dpr);
+    this.canvas.style.width = W + 'px';
+    this.canvas.style.height = H + 'px';
+    this.cam.W = W;
+    this.cam.H = H;
+    this.cam.dpr = this.dpr;
+  }
 
-  private render(): void {
+  private get s(): number {
+    return Math.max(0.55, Math.min(1.5, Math.min(this.cam.W / 1280, this.cam.H / 720)));
+  }
+
+  private newRun(): void {
+    this.run = newRun((Date.now() % 100000) + 1);
+    this.startShift();
+    sfx.setMusic(true);
+  }
+
+  private startShift(): void {
+    const r = this.run;
+    this.shift = new Shift({ seed: r.seed, shift: r.shift, target: targetFor(r.shift), stamps: r.stamps, parts: r.parts, glasses: r.glassesMax, rule: ruleFor(r.shift, r.seed) });
+    this.art = new WorldArt(this.shift.course);
+    this.posts = [];
+    this.shownPosted = 0;
+    this.fx.clear();
+
+    this.finishInfo = null;
+    this.pendingFinish = 0;
+    this.mode = r.shift === 1 && this.mode === 'title' ? 'title' : 'intro';
+    this.modeT = 0;
+    const p = this.shift.sim.pos;
+    this.cam.x = p.x + 3;
+    this.cam.y = p.y + 1.5;
+    // settle the cart on its wheels before showing it
+    for (let i = 0; i < 30; i++) this.shift.sim.step({ gas: false, brake: false }, TICK);
+  }
+
+  private showHint(id: string, text: string): void {
+    if (this.seenHints.has(id) || this.save.hintsDone.includes(id)) return;
+    this.seenHints.add(id);
+    this.hint = { id, text, t: 0 };
+  }
+  private retireHint(id: string): void {
+    if (this.hint?.id === id) this.hint = null;
+    if (!this.save.hintsDone.includes(id)) {
+      this.save.hintsDone.push(id);
+      writeSave(this.save);
+    }
+  }
+
+  // ---------------------------------------------------------------- frame
+
+  private frame(now: number): void {
+    if (this.last === null) this.last = now;
+    let dt = (now - this.last) / 1000;
+    this.last = now;
+    if (dt > 0.25) dt = 0.25;
+    if (!(dt > 0)) dt = 0;
+    this.fdt = dt;
+    this.handleKeys();
+    this.handleClicks();
+    if (!this.paused) {
+      this.acc += dt;
+      let steps = 0;
+      while (this.acc >= TICK && steps < 5) {
+        this.tick();
+        this.acc -= TICK;
+        steps++;
+      }
+      if (steps === 5) this.acc = 0;
+      this.t += dt;
+      this.modeT += dt;
+      this.fx.update(dt);
+      this.updatePosts(dt);
+    }
+    sfx.update();
+    sfx.engineUpdate(this.shift.sim.speed, this.shift.sim.throttle, (this.mode === 'drive' || this.mode === 'title' || this.mode === 'intro') && !this.paused && !this.shift.sim.crashed);
+    this.render(Math.min(1, this.acc / TICK));
+  }
+
+  private handleKeys(): void {
+    for (const k of this.input.takePressed()) {
+      if (k === 'm') {
+        this.save.muted = !this.save.muted;
+        sfx.setMuted(this.save.muted);
+        writeSave(this.save);
+      }
+      if (k === 'pause' && this.mode === 'drive') {
+        this.paused = !this.paused;
+        this.input.clear();
+        this.last = null;
+        continue;
+      }
+      if (this.paused) {
+        if (k === 'r') {
+          this.paused = false;
+          this.newRun();
+        }
+        if (k === 'enter' || k === 'post') this.paused = false;
+        continue;
+      }
+      if (this.mode === 'results' && this.modeT > 0.6 && (k === 'enter' || k === 'post')) this.afterResults();
+      else if ((this.mode === 'over' || this.mode === 'dawn') && this.modeT > 0.8 && (k === 'enter' || k === 'r' || k === 'post')) {
+        this.mode = 'title';
+        this.newRun();
+      } else if (this.mode === 'shop') this.shopKey(k);
+    }
+  }
+
+  private handleClicks(): void {
+    const clicks = this.input.takeClicks();
+    for (const c of clicks) {
+      const hit = [...this.hits].reverse().find((h) => inside(h.r, c.x, c.y));
+      if (!hit) continue;
+      sfx.click();
+      this.onHit(hit.id);
+    }
+  }
+
+  private onHit(id: string): void {
+    if (id === 'pause') {
+      this.paused = true;
+      this.input.clear();
+      return;
+    }
+    if (id === 'resume') {
+      this.paused = false;
+      this.last = null;
+      return;
+    }
+    if (id === 'restart') {
+      this.paused = false;
+      this.mode = 'title';
+      this.newRun();
+      return;
+    }
+    if (id === 'mute') {
+      this.save.muted = !this.save.muted;
+      sfx.setMuted(this.save.muted);
+      writeSave(this.save);
+      return;
+    }
+    if (id === 'motion') {
+      this.save.reduced = !this.save.reduced;
+      this.fx.reduced = this.save.reduced;
+      writeSave(this.save);
+      return;
+    }
+    if (id === 'continue') return this.afterResults();
+    if (id === 'again') {
+      this.mode = 'title';
+      this.newRun();
+      return;
+    }
+    if (id === 'next') return this.leaveShop();
+    if (id === 'reroll') return this.reroll();
+    if (id.startsWith('offer:')) {
+      const i = Number(id.slice(6));
+      if (this.selected?.kind === 'offer' && this.selected.i === i) this.buy(i);
+      else this.selected = { kind: 'offer', i };
+      return;
+    }
+    if (id.startsWith('buy:')) return this.buy(Number(id.slice(4)));
+    if (id.startsWith('own:')) {
+      const i = Number(id.slice(4));
+      this.selected = this.selected?.kind === 'own' && this.selected.i === i ? null : { kind: 'own', i };
+      return;
+    }
+    if (id.startsWith('sell:')) return this.sell(Number(id.slice(5)));
+  }
+
+  // ---------------------------------------------------------------- simulation tick
+
+  private tick(): void {
+    const sh = this.shift;
+    const driving = this.mode === 'drive';
+    const allowMouse = this.input.mouse.y > this.cam.H * 0.18 || this.input.mouse.y < 0;
+    const bot = this.auto ? botInput(sh, { flips: true }, this.botMem) : null;
+    const gas = bot ? bot.gas : this.input.gas(allowMouse);
+    const brake = bot ? bot.brake : this.input.brake(allowMouse);
+    if ((this.mode === 'title' || this.mode === 'intro') && (gas || brake) && this.modeT > 0.3) {
+      this.mode = 'drive';
+      this.modeT = 0;
+      this.retireHint('drive');
+    }
+    if (this.mode === 'title' || this.mode === 'intro') {
+      this.input.takePost();
+      sh.sim.step({ gas: false, brake: false }, TICK);
+      if (this.mode === 'title' || this.run.shift === 1) this.showHint('drive', this.input.touchUI ? 'Hold the right pad to drive' : 'Hold → or D to drive');
+      return;
+    }
+    if (!driving) {
+      // keep the world alive behind the result card, freeze it behind full-screen menus
+      if (this.mode !== 'results') return;
+      if (!sh.done) sh.step({ gas: false, brake: false, post: false });
+      else sh.sim.step({ gas: false, brake: false }, TICK);
+      this.input.takePost();
+      if (this.pendingFinish > 0 && --this.pendingFinish === 0) this.enterResults();
+      return;
+    }
+    const post = this.input.takePost() || !!bot?.post;
+    sh.step({ gas, brake, post });
+    this.handleEvents(sh.events);
+    // embers stream off a big flame
+    const fl = sh.flame.size;
+    if (!sh.sim.crashed && sh.flame.alive && Math.random() < 0.15 + fl * 0.6) {
+      const lamp = sh.sim.lampWorld();
+      const v = sh.sim.chassis.getLinearVelocity();
+      this.fx.parts.push({ x: lamp.x + (Math.random() - 0.5) * 0.2, y: lamp.y + 0.7 + fl * 0.5, vx: v.x * 0.2 - 1 - Math.random(), vy: 1 + Math.random() * 1.5, life: 0.5 + fl * 0.5, max: 0.5 + fl * 0.5, size: 0.06 + fl * 0.06, color: Math.random() < 0.5 ? C.fire : C.fireOrange, kind: 'spark', rot: 0, vr: 0, g: -1 });
+    }
+    if (sh.done && this.pendingFinish === 0) {
+      this.pendingFinish = 1;
+      sh.sim.settle();
+    }
+    if (this.pendingFinish > 0) {
+      this.mode = 'results';
+      this.modeT = -1;
+      this.pendingFinish = 70;
+    }
+    // contextual hints
+    if (sh.sim.airborne && sh.sim.airTicks > 20) this.showHint('flip', this.input.touchUI ? 'In the air: right pad flips back, left pad flips forward' : 'In the air: → flips back, ← flips forward');
+    const w = sh.windowInRange();
+    if (w && sh.flame.alive) this.showHint('post', this.input.touchUI ? 'Tap POST to light the window with your flame!' : 'Press SPACE to post your flame into the window!');
+    if (this.hint?.id === 'flip' && !sh.sim.airborne && sh.tricks > 0) this.retireHint('flip');
+  }
+
+  private handleEvents(events: readonly ShiftEvent[]): void {
+    const sh = this.shift;
+    for (const e of events) {
+      switch (e.type) {
+        case 'trick': {
+          const p = e.pop;
+          if (p.label === 'Letter') {
+            this.fx.pop(`+${p.heat}`, e.x, e.y + 0.4, C.cream, p.sparks > 0 ? '+1 spark' : '', 0.6, 0.7);
+            break;
+          }
+          const big = p.label.includes('flip') || p.label.includes('Huge');
+          const col = p.label.includes('flip') ? C.pink : p.label.includes('Air') ? C.teal : p.label.includes('Wheelie') ? C.mustard : C.green;
+          const sub = `+${fmt(p.heat)} heat${p.sparks > 0 ? `  +${p.sparks} spark${p.sparks > 1 ? 's' : ''}` : p.sparks < 0 ? '  sparks snuffed!' : p.repeat > 0 ? '  (again)' : ''}`;
+          this.fx.pop(p.label, e.x, e.y, col, sub, big ? 1.25 : 0.95, 1.3);
+          sfx.trick(sh.flame.sparks, big);
+          const lamp = sh.sim.lampWorld();
+          if (p.sparks > 0) this.fx.burst(lamp.x, lamp.y + 0.4, 14, 'spark', [C.fire, C.fireHot, C.fireOrange], 5, 0.12, 0.6, 4);
+          if (big) this.fx.kick(4);
+          break;
+        }
+        case 'letter':
+          this.fx.burst(e.x, e.y, 8, 'paper', [C.white, C.cream, C.red], 3, 0.1, 0.8, 6);
+          sfx.letter(this.lastLetterN++);
+          break;
+        case 'post': {
+          const lamp = sh.sim.lampWorld();
+          this.posts.push({ t: 0, w: e.window, fromX: lamp.x, fromY: lamp.y + 0.4, heat: e.heat, sparks: e.sparks, value: e.value, parts: e.parts, shown: e.heat, sparkI: 0, partI: 0, landed: false, bell: false, fly: 0 });
+          this.run.windows++;
+          sfx.whoosh();
+          this.retireHint('post');
+          break;
+        }
+        case 'emptyPost':
+          this.fx.pop('No flame to post!', e.window.x, e.window.y + 3.2, C.paper, 'do a trick first', 0.7, 0.9);
+          sfx.emptyPost();
+          break;
+        case 'skip':
+          if (e.sparks > 0) {
+            this.fx.pop('Postage Due', e.window.x, e.window.y + 3.4, C.mustard, `+${e.sparks} sparks`, 0.8);
+            sfx.trick(sh.flame.sparks, false);
+          }
+          if (sh.flame.alive) this.showHint('greed', 'Skipped a window: your flame keeps growing… but a big flame blows out on hard landings!');
+          break;
+        case 'land': {
+          const k = e.impact / e.tolerance;
+          this.fx.burst(e.x, e.y + 0.1, Math.round(4 + k * 10), 'dust', ['rgba(255,241,207,0.8)', 'rgba(243,217,164,0.8)'], 2 + k * 3, 0.18, 0.5, 2);
+          this.fx.kick(Math.min(10, e.impact * 0.5));
+          sfx.land(e.impact);
+          if (k > 0.8 && k <= 1 && sh.flame.alive) this.fx.pop('Close call!', e.x, e.y + 2.6, C.fireOrange, '', 0.7, 0.8);
+          if (this.hint?.id === 'flip' && sh.tricks > 0) this.retireHint('flip');
+          break;
+        }
+        case 'takeoff':
+          sfx.takeoff();
+          break;
+        case 'blowout': {
+          const lamp = sh.sim.lampWorld();
+          this.fx.burst(lamp.x, lamp.y + 0.5, 24, 'dust', ['rgba(80,70,110,0.7)', 'rgba(140,130,160,0.6)'], 3, 0.3, 1.1, -1);
+          this.fx.burst(lamp.x, lamp.y + 0.5, 14, 'spark', [C.fireOrange, C.fireRed], 6, 0.1, 0.5, 6);
+          this.fx.pop('Blown out!', lamp.x, lamp.y + 1.6, C.fireRed, e.lost ? `-${fmt(e.lost)} postage` : '', 1.15, 1.4);
+          this.fx.kick(9);
+          sfx.blowout();
+          this.mood = -1;
+          this.showHint('blow', 'Bigger flames are fragile: land on downslopes, or post sooner!');
+          break;
+        }
+        case 'crash': {
+          const lamp = sh.sim.lampWorld();
+
+          this.fx.burst(lamp.x, lamp.y, 22, 'glass', ['rgba(200,235,255,0.9)', C.white], 7, 0.12, 1.1, 14);
+          this.fx.burst(lamp.x, lamp.y, 12, 'spark', [C.fireOrange, C.fire], 5, 0.1, 0.6, 8);
+          this.fx.pop(e.reason === 'fall' ? 'Into the drawer!' : 'Smashed!', e.x, e.y + 2, C.red, `${sh.glasses} glass${sh.glasses === 1 ? '' : 'es'} left`, 1.2, 1.5);
+          this.fx.kick(14);
+          sfx.crash();
+          this.mood = -1;
+          break;
+        }
+        case 'respawn': {
+          const p = sh.sim.pos;
+          this.fx.ring(p.x, p.y + 0.3, C.fire, 2.5);
+
+          this.mood = 0;
+          break;
+        }
+        case 'finish':
+          sfx.fanfare(e.passed);
+          break;
+      }
+    }
+  }
+
+  private updatePosts(dt: number): void {
+    const FLY = 0.32;
+    for (const p of this.posts) {
+      p.t += dt;
+      if (p.t >= FLY && !p.bell) {
+        p.bell = true;
+        sfx.bell();
+        const wy = p.w.high ? p.w.y : p.w.y + 3.6;
+        this.fx.burst(p.w.x, wy, 20, 'spark', [C.fire, C.fireHot, C.cream], 6, 0.14, 0.7, 3);
+        this.fx.ring(p.w.x, wy, C.fire, 3);
+        this.fx.kick(3);
+      }
+      const tally = p.t - FLY - 0.15;
+      const per = Math.max(0.05, Math.min(0.11, 0.9 / p.sparks));
+      while (tally > 0 && p.sparkI < p.sparks && tally > p.sparkI * per) {
+        p.sparkI++;
+        p.shown = p.heat * p.sparkI;
+        sfx.spark(p.sparkI);
+      }
+      const t2 = tally - p.sparks * per;
+      while (p.sparkI >= p.sparks && t2 > 0 && p.partI < p.parts.length && t2 > p.partI * 0.22) {
+        p.partI++;
+        sfx.stamp();
+        p.shown = p.value;
+      }
+      if (p.sparkI >= p.sparks && p.partI >= p.parts.length) p.shown = p.value;
+      const done = t2 - p.parts.length * 0.22;
+      p.fly = done > 0.45 ? Math.min(1, (done - 0.45) / 0.35) : 0;
+      if (p.fly >= 1 && !p.landed) {
+        p.landed = true;
+        this.meterBump = 1;
+        sfx.coin(2);
+      }
+    }
+    this.posts = this.posts.filter((p) => p.t < 4);
+    // the meter counts up only as posts land
+    let landed = 0;
+    for (const p of this.posts) if (!p.landed) landed += p.value;
+    const target = Math.max(0, this.shift.posted - landed);
+    this.shownPosted += (target - this.shownPosted) * Math.min(1, dt * 8);
+    if (Math.abs(target - this.shownPosted) < 1) this.shownPosted = target;
+    this.meterBump *= Math.pow(0.01, dt);
+  }
+
+  // ---------------------------------------------------------------- results & shop
+
+  private enterResults(): void {
+    const sh = this.shift;
+    const target = sh.cfg.target;
+    const passed = sh.passed;
+    this.run.total += sh.posted;
+    this.run.bestPost = Math.max(this.run.bestPost, sh.bestPost);
+    if (!passed) {
+      this.mode = 'over';
+      this.modeT = 0;
+      this.recordBest();
+      return;
+    }
+    const lines = wages(sh);
+    const earned = lines.reduce((a, l) => a + l[1], 0);
+    this.run.pennies += earned;
+    this.finishInfo = { posted: sh.posted, target, passed, earned, lines };
+    this.modeT = 0;
+    this.mode = 'results';
+  }
+
+  private afterResults(): void {
+    if (this.mode !== 'results' || !this.finishInfo) return;
+    if (this.run.shift >= SHIFTS) {
+      this.mode = 'dawn';
+      this.modeT = 0;
+      this.recordBest();
+      sfx.fanfare(true);
+      return;
+    }
+    this.openShop();
+  }
+
+  private recordBest(): void {
+    if (this.run.total > this.save.best) this.save.best = this.run.total;
+    this.save.bestShift = Math.max(this.save.bestShift, this.run.shift - (this.mode === 'over' ? 1 : 0));
+    writeSave(this.save);
+  }
+
+  private openShop(): void {
+    this.mode = 'shop';
+    this.modeT = 0;
+    this.rerolls = 0;
+    this.rollOffers();
+    this.selected = { kind: 'offer', i: 0 };
+  }
+
+  private rollOffers(): void {
+    this.offers = rollOffers(this.run, this.rerolls);
+  }
+
+  private priceOf(o: Offer): number {
+    return priceOf(o);
+  }
+
+  private rerollCost(): number {
+    return rerollCost(this.rerolls);
+  }
+
+  private reroll(): void {
+    if (this.run.pennies < this.rerollCost()) return sfx.deny();
+    this.run.pennies -= this.rerollCost();
+    this.rerolls++;
+    this.rollOffers();
+    this.selected = { kind: 'offer', i: 0 };
+    sfx.coin(0);
+  }
+
+  private buy(i: number): void {
+    const o = this.offers[i];
+    if (!o || o.sold) return;
+    if (!buyOffer(this.run, o)) {
+      sfx.deny();
+      this.fx.kick(3);
+      return;
+    }
+    this.selected = null;
+    sfx.coin(3);
+    sfx.stamp();
+  }
+
+  private sell(i: number): void {
+    const id = this.run.stamps[i];
+    if (!id) return;
+    this.run.stamps.splice(i, 1);
+    this.run.pennies += Math.floor(STAMPS[id].price / 2);
+    this.selected = null;
+    sfx.coin(1);
+  }
+
+  private leaveShop(): void {
+    this.run.shift++;
+    this.mode = 'intro';
+    this.startShift();
+  }
+
+  private shopKey(k: string): void {
+    if (k === 'enter') return this.leaveShop();
+    if (k === 'r') return this.reroll();
+    const n = Number(k);
+    if (n >= 1 && n <= this.offers.length) {
+      if (this.selected?.kind === 'offer' && this.selected.i === n - 1) this.buy(n - 1);
+      else this.selected = { kind: 'offer', i: n - 1 };
+    }
+  }
+
+  // ---------------------------------------------------------------- camera
+
+  private updateCamera(pose: Pose): void {
+    const sim = this.shift.sim;
+    const v = sim.chassis.getLinearVelocity();
+    const H = this.cam.H;
+    const ground = groundAt(this.shift.course, pose.x) ?? pose.y - 3;
+    const height = Math.max(0, pose.y - ground);
+    const viewM = Math.max(10.5 + Math.abs(v.x) * 0.22, height * 1.6 + 6);
+    const ppmT = H / Math.min(24, viewM);
+    const lead = Math.max(-2, Math.min(this.cam.W / ppmT * 0.18, v.x * 0.35));
+    const tx = pose.x + lead + 1.5;
+    const ty = Math.max(pose.y - height * 0.45 + 1.2, pose.y - viewM * 0.3);
+    const dt = this.fdt;
+    const k = this.mode === 'title' ? 1 : ease(0.08, dt);
+    this.cam.x += (tx - this.cam.x) * k;
+    this.cam.y += (ty - this.cam.y) * ease(0.06, dt);
+    this.cam.ppm += (ppmT - this.cam.ppm) * ease(0.04, dt);
+    if (!Number.isFinite(this.cam.x) || !Number.isFinite(this.cam.y) || !Number.isFinite(this.cam.ppm)) {
+      this.cam.x = tx;
+      this.cam.y = ty;
+      this.cam.ppm = ppmT;
+    }
+    if (this.mode === 'title' || this.mode === 'intro') {
+      this.cam.ppm = H / 10.5;
+      this.cam.x = pose.x + 3.4;
+      this.cam.y = pose.y + 1.6;
+    }
+  }
+
+  // ---------------------------------------------------------------- render
+
+  private render(alpha: number): void {
     const ctx = this.ctx;
-    const L = this.L;
-    const res = this.res();
-    ctx.setTransform(res, 0, 0, res, 0, 0);
-    ctx.imageSmoothingEnabled = true;
-    const controls: HoldControl[] = [];
-
-    if (this.mode === 'routes') {
-      drawRoutes(ctx, this, L);
-      controls.push(...(routesControls(this, L) as HoldControl[]));
-    } else {
-      this.renderWorld(ctx, controls);
-    }
-    if (this.paused) {
-      drawPauseSlip(ctx, this, L);
-      this.controls = pauseControls(this, L) as HoldControl[];
-    } else this.controls = controls;
-    if (this.saveNote > 0) {
-      ctx.save();
-      ctx.globalAlpha = Math.min(1, this.saveNote);
-      paperNote(ctx, 'Saving is off in this browser: progress lasts for this session.', L.W / 2, L.H - 140, { align: 'center', size: TYPE.body, maxW: 420 });
-      ctx.restore();
-    }
-    this.a11y.sync(this.controls, L.s);
-  }
-
-  private renderWorld(ctx: CanvasRenderingContext2D, controls: HoldControl[]): void {
-
-    const cam = this.cam;
-    const res = this.res();
-    const sim = this.sim;
-    const running = (this.mode === 'run' || this.mode === 'result') && sim && this.prev && this.cur;
-    const frame = running ? frameFromSim(sim, this.prev!, this.cur!, this.alpha) : this.benchFrame();
-    if (running) this.updateRunCamera(1 / 60, frame);
-    // Shake offsets only the view, never the simulation.
-    const sx = this.shake > 0 ? (Math.sin(this.time * 90) * 4 * this.shake) / cam.ppm : 0;
-    const sy = this.shake > 0 ? (Math.cos(this.time * 77) * 3 * this.shake) / cam.ppm : 0;
-    cam.cx += sx;
-    cam.cy += sy;
-
-    if (this.backdrop) drawBackdrop(ctx, cam, this.backdrop, FX.reducedMotion || !FX.decor);
-    drawCounterBack(ctx, cam, this.route);
-    drawTerrain(ctx, cam, this.route, false);
-    drawCounterFront(ctx, cam, this.route);
-    drawWindowBack(ctx, cam, this.route, {
-      // A window lit on an earlier night stays lit; a first delivery lights it on cue.
-      lit: this.windowLit.get(this.route.id) ?? (this.save.data.delivered[this.route.id] ? 1 : 0),
-      wick: this.result?.kind === 'delivered' ? this.wickT : 0,
-      clerk: this.result?.kind === 'delivered' ? clamp((this.result.t - 0.15) / 0.3, 0, 1) : 0,
-      time: this.time,
-    });
-    const propPose = (b: planck.Body | null) => (b && this.cur && this.cur.bodies.has(b) ? lerpXf(this.prev?.bodies.get(b), this.cur.bodies.get(b)!, this.alpha) : null);
-    const seesawPose = propPose(sim?.seesaw ?? null);
-    drawSeesaw(ctx, cam, this.route, seesawPose ?? (this.route.seesaw ? { x: this.route.seesaw.pivot[0] + Math.cos(this.route.seesaw.angle0) * this.route.seesaw.offset, y: this.route.seesaw.pivot[1] + Math.sin(this.route.seesaw.angle0) * this.route.seesaw.offset + this.route.seesaw.thickness / 2, a: this.route.seesaw.angle0 } : null));
-    const rollerPose = propPose(sim?.roller ?? null);
-    drawRoller(ctx, cam, this.route, !!this.stripePart, rollerPose?.a ?? 0);
-    const flapPose = propPose(sim?.flap ?? null);
-    drawFlap(ctx, cam, this.route, flapPose);
-    if (this.chalk) drawChalkTick(ctx, cam.sx(this.chalk.x), cam.sy(this.chalk.y));
-
-    // Bench furniture: chock and clamp (they stay in the world when the cart leaves).
-    const rig = running ? this.clampAnchor : this.benchRig(this.displayPose());
-    if (rig) {
-      const gy = cam.sy(this.route.start.groundY);
-      drawChock(ctx, cam.ppm, cam.sx(rig.chockX), gy, this.clampOpen);
-      drawClamp(ctx, cam.ppm, { open: this.clampOpen, padX: cam.sx(rig.padX), padY: cam.sy(rig.padY), postX: cam.sx(rig.postX), groundY: gy });
-    }
-
-    // Bench moth stands beside the cart, leaning into the clamp until it is safe to let go.
-    const benchMoth = !running || this.mothHop < 1;
-    if (benchMoth && this.mode !== 'run' && this.mode !== 'result') {
-      const spot = this.mothBenchSpot();
-      ctx.save();
-      ctx.translate(cam.sx(spot.x), cam.sy(spot.y));
-      drawMoth(ctx, { k: cam.ppm, pose: this.mothPose, t: ease(this.mothT), time: this.time }, this.mothFrom);
-      ctx.restore();
-    }
-
-    // The cart.
-    const lit = sim ? sim.lit : true;
-    const cracks = sim ? sim.cracks : 0;
-    if (running && sim) {
-      const v = sim.rig.lamp.getLinearVelocity();
-      const ax = (v.x - this.lastLampVx) * 60;
-      this.lastLampVx = v.x;
-      const target = clamp(-ax * 0.03, -0.5, 0.5);
-      this.lean += (target - this.lean) * 0.2;
-    } else this.lean *= 0.8;
-    const hidden = this.drag?.active && this.drag.from === 'mounted' ? this.drag.id ?? null : null;
-    const hiddenSet = hidden ? new Set([hidden, ...descendants(this.ws.bp, hidden)]) : null;
-    const drawnFrame: CartFrame = hiddenSet ? { ...frame, parts: frame.parts.filter((p) => !hiddenSet.has(p.id)) } : frame;
-    // Fit settle: the gap closes and the part overshoots a pixel or two.
-    if (this.fitSettle.size && !running) {
-      drawnFrame.parts = drawnFrame.parts.map((p) => {
-        const t = this.fitSettle.get(p.id);
-        if (t === undefined) return p;
-        const off = (t < 0.5 ? -3 + t * 2 * 4.5 : 1.5 * (1 - (t - 0.5) * 2)) / cam.ppm;
-        return { ...p, pose: { ...p.pose, y: p.pose.y - off } };
-      });
-    }
-    const mothOnCart = running;
-    drawCart(ctx, cam, drawnFrame, {
-      res,
-      stripePart: this.stripePart,
-      selected: this.sel?.from === 'mounted' ? this.sel.id ?? null : null,
-      lamp: {
-        cracks,
-        lit,
-        lean: FX.reducedMotion ? this.lean * 0.5 : this.lean,
-        flicker: FX.reducedMotion ? 0 : (Math.sin(this.time * 13) + Math.sin(this.time * 7.3)) * 0.5,
-        ember: this.ember,
-        stopGlint: this.stopGlint,
-        stopSide: this.stopSide,
-      },
-      moth: mothOnCart
-        ? (c, seat) => {
-            const hop = ease(this.mothHop);
-            const x = lerp(cam.sx(this.hopFrom.x), cam.sx(seat.x), hop);
-            const y = lerp(cam.sy(this.hopFrom.y), cam.sy(seat.y), hop) - Math.sin(hop * Math.PI) * 30;
-            c.save();
-            c.translate(x, y);
-            c.rotate(-seat.a * hop);
-            drawMoth(c, { k: cam.ppm, pose: this.mothPose, t: ease(this.mothT), time: this.time }, this.mothFrom);
-            c.restore();
-          }
-        : undefined,
-    });
-    drawTerrain(ctx, cam, this.route, true);
-    this.drawFx(ctx);
-
-    if (this.backdrop && FX.decor) drawVignette(ctx, this.backdrop, this.L.W, this.L.H);
-    // Bench overlays: plumb marks, sockets, drag.
-    if (this.mode === 'bench') this.drawBenchOverlays(ctx, frame);
-    if (FX.overlay) this.drawDevOverlay(ctx, frame);
-    cam.cx -= sx;
-    cam.cy -= sy;
-
-    this.drawHud(ctx, controls, frame);
-  }
-
-  private drawFx(ctx: CanvasRenderingContext2D): void {
-    const cam = this.cam;
-    for (const f of this.fx) {
-      const a = 1 - f.t / f.dur;
-      const x = cam.sx(f.x);
-      const y = cam.sy(f.y);
-      ctx.save();
-      ctx.globalAlpha = a;
-      if (f.kind === 'dust') {
-        ctx.fillStyle = C.paperShade;
-        ctx.beginPath();
-        ctx.arc(x, y, f.size * cam.ppm * (1 + f.t * 2), 0, Math.PI * 2);
-        ctx.fill();
-      } else if (f.kind === 'shard') {
-        ctx.fillStyle = 'rgba(230,245,240,0.95)';
-        ctx.translate(x, y);
-        ctx.rotate(f.t * 12);
-        ctx.beginPath();
-        ctx.moveTo(-3, -2);
-        ctx.lineTo(4, 0);
-        ctx.lineTo(-1, 3);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = C.ink;
-        ctx.lineWidth = 0.8;
-        ctx.stroke();
-      } else if (f.kind === 'ring') {
-        ctx.strokeStyle = C.brassGlint;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(x, y, (0.06 + f.t * 0.5) * cam.ppm, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
-  }
-
-  private drawBenchOverlays(ctx: CanvasRenderingContext2D, frame: CartFrame): void {
-    const cam = this.cam;
-    const k = cam.ppm;
-    const pose = frame.chassis;
-    // Plumb mark (solid) below the rail, from real masses including the lamp.
-    const plumbY = (CHASSIS.bottom + CHASSIS.top) / 2;
-    const [px, py] = apply(pose, [this.com.cx, plumbY]);
-    drawPlumb(ctx, cam.sx(px), cam.sy(py), false);
-    if (this.proposedCom) {
-      const [hx, hy] = apply(pose, [this.proposedCom.cx, plumbY]);
-      drawPlumb(ctx, cam.sx(hx), cam.sy(hy), true);
-    }
-    // Sockets for the held or selected part.
-    const kind = this.drag?.active ? this.drag.kind : this.sel?.kind;
-    const moving = this.drag?.active ? (this.drag.from === 'mounted' ? this.drag.id : undefined) : this.sel?.id;
-    const rot = this.drag?.active ? this.drag.rot : this.sel?.rot;
-    const focused = this.a11y.focused();
-    if (kind) {
-      const ts = this.computeTargets(kind, moving, rot);
-      for (const t of ts) {
-        const x = cam.sx(t.x);
-        const y = cam.sy(t.y);
-        const isTarget = this.target && this.target.ref.parent === t.ref.parent && this.target.ref.socket === t.ref.socket;
-        const isFocus = focused === `socket:${t.ref.parent}:${t.ref.socket}`;
-        if (t.res.ok) {
-          // Open brass ring: this hole accepts the part.
-          ctx.save();
-          ctx.strokeStyle = C.ink;
-          ctx.lineWidth = 5;
-          ctx.beginPath();
-          ctx.arc(x, y, 9, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.strokeStyle = C.brassGlint;
-          ctx.lineWidth = 2.5;
-          ctx.stroke();
-          ctx.restore();
-        } else if (isTarget || isFocus) {
-          hatchedCross(ctx, x, y, 12);
-        }
-        if (isFocus && this.sel && !this.drag) {
-          // Keyboard preview of the fitted silhouette.
-          if (t.res.ok) {
-            this.drawGhost(ctx, t.res.bp, t.res.placement.id, pose);
-            if (!this.proposedCom || this.targetsKey) {
-              const pc = massInfo(t.res.bp, this.route.lampStart);
-              const [hx, hy] = apply(pose, [pc.cx, plumbY]);
-              drawPlumb(ctx, cam.sx(hx), cam.sy(hy), true);
-            }
-          }
-          focusRing(ctx, { x: x - 14, y: y - 14, w: 28, h: 28 }, 14);
-        }
-      }
-    }
-    // The dragged piece: snapped preview at a legal socket, else under the pointer.
-    const d = this.drag;
-    if (d?.active) {
-      const t = this.target;
-      if (t && t.res.ok) {
-        this.drawGhost(ctx, t.res.bp, t.res.placement.id, pose, true);
-      }
-      const o = this.dragOrigin(d);
-      const sc = lerp(this.L.trayK / k, 1, d.grow);
-      ctx.save();
-      ctx.translate(cam.sx(o.x), cam.sy(o.y));
-      // Lifted 2-3 px away from its shadow.
-      ctx.save();
-      ctx.translate(3, 6);
-      ctx.globalAlpha = 0.35;
-      ctx.filter = 'brightness(0)';
-      this.drawBranch(ctx, d, k * sc);
-      ctx.restore();
-      ctx.translate(0, -3);
-      if (t && t.res.ok) ctx.globalAlpha = 0.5;
-      this.drawBranch(ctx, d, k * sc);
-      ctx.restore();
-      if (t && !t.res.ok) {
-        hatchedCross(ctx, cam.sx(t.x), cam.sy(t.y), 12);
-      }
-    }
-    // Rejection: hatch just the incompatible hole, reason beside it.
-    if (this.rejectAt && this.rejectAt.t < 0.45) hatchedCross(ctx, cam.sx(this.rejectAt.x), cam.sy(this.rejectAt.y), 12);
-    if (this.mode === 'bench' && this.legal && !this.drag && !this.sel) {
-      // nothing
-    }
-    void k;
-  }
-
-  /** Dragged part plus its children, drawn in the moving part's frame. */
-  private drawBranch(ctx: CanvasRenderingContext2D, d: Drag, k: number): void {
-    const res = this.res();
-    if (d.from === 'mounted' && d.id) {
-      const L = bpLayout(this.ws.bp);
-      const root = L.get(d.id);
-      if (root) {
-        const inv = { x: -root.xf.x, y: -root.xf.y, a: 0 };
-        const ids = [d.id, ...descendants(this.ws.bp, d.id)];
-        for (const id of ids.reverse()) {
-          const lp = L.get(id);
-          if (!lp) continue;
-          const rel = compose(inv, lp.xf);
-          ctx.save();
-          ctx.translate(rel.x * k, -rel.y * k);
-          ctx.rotate(-rel.a);
-          drawPart(ctx, lp.p.kind, { k, res });
-          ctx.restore();
-        }
-        return;
-      }
-    }
-    ctx.save();
-    const rots = PARTS[d.kind].rotations;
-    const a = rots[d.rot ?? (d.kind === 'spar' ? 1 : 0)] ?? 0;
-    ctx.rotate(-a);
-    drawPart(ctx, d.kind, { k, res, spin: d.kind === 'keyWheel' ? 0.4 : 0 });
-    ctx.restore();
-  }
-
-  /** Exact fitted silhouette at the target socket. */
-  private drawGhost(ctx: CanvasRenderingContext2D, bp: Blueprint, id: string, pose: Xf, solid = false): void {
-    const cam = this.cam;
-    const L = bpLayout(bp);
-    const ids = [id, ...descendants(bp, id)];
-    ctx.save();
-    ctx.globalAlpha = solid ? 0.92 : 0.7;
-    for (const pid of ids) {
-      const lp = L.get(pid);
-      if (!lp) continue;
-      const w = compose(pose, lp.xf);
-      ctx.save();
-      ctx.translate(cam.sx(w.x), cam.sy(w.y));
-      if (lp.p.kind !== 'keyWheel' && lp.p.kind !== 'reel') ctx.rotate(-w.a);
-      drawPart(ctx, lp.p.kind, { k: cam.ppm, res: this.res(), spin: pose.a });
-      ctx.restore();
-    }
-    ctx.restore();
-  }
-
-  private drawDevOverlay(ctx: CanvasRenderingContext2D, frame: CartFrame): void {
-    const cam = this.cam;
-    ctx.save();
-    ctx.lineWidth = 1;
-    if (this.sim) {
-      for (let b = this.sim.world.getBodyList(); b; b = b.getNext()) {
-        const p = b.getPosition();
-        const a = b.getAngle();
-        for (let f = b.getFixtureList(); f; f = f.getNext()) {
-          const s = f.getShape();
-          ctx.strokeStyle = f.isSensor() ? '#ff00ff' : '#00ff66';
-          ctx.beginPath();
-          if (s.getType() === 'circle') {
-            const c = s as unknown as { m_p: { x: number; y: number }; m_radius: number };
-            const [x, y] = apply({ x: p.x, y: p.y, a }, [c.m_p.x, c.m_p.y]);
-            ctx.arc(cam.sx(x), cam.sy(y), c.m_radius * cam.ppm, 0, Math.PI * 2);
-          } else {
-            const v = (s as unknown as { m_vertices: { x: number; y: number }[] }).m_vertices;
-            v.forEach((q, i) => {
-              const [x, y] = apply({ x: p.x, y: p.y, a }, [q.x, q.y]);
-              i ? ctx.lineTo(cam.sx(x), cam.sy(y)) : ctx.moveTo(cam.sx(x), cam.sy(y));
-            });
-            if (s.getType() !== 'chain') ctx.closePath();
-          }
-          ctx.stroke();
-        }
-      }
-    } else {
-      for (const lp of bpLayout(this.ws.bp).values()) {
-        for (const s of lp.solids) {
-          ctx.strokeStyle = '#00ff66';
-          ctx.beginPath();
-          if (s.type === 'circle') {
-            const [x, y] = apply(frame.chassis, [s.x, s.y]);
-            ctx.arc(cam.sx(x), cam.sy(y), s.r * cam.ppm, 0, Math.PI * 2);
-          } else {
-            s.pts.forEach((q, i) => {
-              const [x, y] = apply(frame.chassis, q);
-              i ? ctx.lineTo(cam.sx(x), cam.sy(y)) : ctx.moveTo(cam.sx(x), cam.sy(y));
-            });
-            ctx.closePath();
-          }
-          ctx.stroke();
-        }
-      }
-      for (const piece of this.route.pieces) {
-        ctx.strokeStyle = '#00ffff';
-        ctx.beginPath();
-        piece.pts.forEach((q, i) => (i ? ctx.lineTo(cam.sx(q[0]), cam.sy(q[1])) : ctx.moveTo(cam.sx(q[0]), cam.sy(q[1]))));
-        ctx.closePath();
-        ctx.stroke();
-      }
-    }
-    for (const s of allSockets(this.ws.bp)) {
-      const [x, y] = apply(frame.chassis, [s.x, s.y]);
-      ctx.fillStyle = '#ff3366';
-      ctx.fillRect(cam.sx(x) - 2, cam.sy(y) - 2, 4, 4);
-    }
-    const a = this.route.arch;
-    ctx.strokeStyle = '#ff00ff';
-    ctx.strokeRect(cam.sx(a.x - a.w / 2), cam.sy(a.y + a.h / 2), a.w * cam.ppm, a.h * cam.ppm);
-    ctx.restore();
-  }
-
-  // ============================================================== HUD
-
-  private drawHud(ctx: CanvasRenderingContext2D, controls: HoldControl[], frame: CartFrame): void {
-    const L = this.L;
-    const focused = this.keyboardFocus || this.device === 'keyboard' ? this.a11y.focused() : null;
-    const bench = this.mode === 'bench';
-    const running = this.mode === 'run' || this.mode === 'result';
-    const stock = this.ws.stock();
-    const best = (id: string) => ({ focus: focused === id, hover: this.hover === id, pressed: this.pressed === id });
-
-    // Route slip (top left).
-    const slipRect = L.compact ? { ...L.slip, w: 260, h: 120 } : L.slip;
-    drawSlip(ctx, slipRect, this.route, {
-      delivered: !!this.save.data.delivered[this.route.id] && !(this.result?.kind === 'delivered' && this.stampT < 1),
-      mark: !!this.save.data.marks[this.route.id] && !(this.result?.kind === 'delivered' && this.result.mark && this.markT < 1),
-      stamp: this.result?.kind === 'delivered' ? this.stampT : 0,
-      markStamp: this.result?.kind === 'delivered' && this.result.mark ? this.markT : 0,
-      blue: this.route.mark.id === 'blue' && !!this.stripePart && this.result?.kind === 'delivered' && this.stampT > 0,
-      outstanding: !this.save.data.marks[this.route.id],
-    }, false);
-
-    // Pause (top right).
-    controls.push({ id: 'pause', label: 'Pause', rect: L.pause, enabled: true, onActivate: () => this.togglePause() });
-    drawTab(ctx, L.pause, 'pause', 'Pause', { enabled: true, ...best('pause') });
-
-    if (bench || this.mode === 'scout') {
-      // Drawer, recesses and the lever.
-      if (this.mode === 'bench') {
-        L.recesses.forEach(({ kind, r }) => {
-          const n = stock[kind];
-          controls.push({
-            id: `tray:${kind}`,
-            label: `${PARTS[kind].label}, ${n} in the drawer${this.sel?.from === 'tray' && this.sel.kind === kind ? ', picked up' : ''}`,
-            rect: r,
-            enabled: n > 0,
-            group: 'tray',
-            onActivate: () => this.selectTray(kind),
-          });
-        });
-      }
-      drawDrawer(ctx, L.drawer, L.recesses, L.trayK, {
-        stock,
-        kit: this.route.kit as Record<PartKind, number>,
-        retract: this.drawerRetract,
-        held: this.drag?.active && this.drag.from === 'tray' ? this.drag.kind : null,
-        selectedKind: this.sel?.from === 'tray' ? this.sel.kind : null,
-        focus: focused,
-        hoverKind: null,
-        res: this.res(),
-        time: this.time,
-        lift: this.trayLift,
-      });
-      if (this.mode === 'bench') {
-        controls.push({ id: 'undo', label: 'Undo', rect: L.undo, enabled: this.ws.canUndo(), onActivate: () => this.undo() });
-        controls.push({ id: 'redo', label: 'Redo', rect: L.redo, enabled: this.ws.canRedo(), onActivate: () => this.redo() });
-        controls.push({ id: 'scout', label: 'Scout the course', rect: L.scout, enabled: true, onActivate: () => this.enterScout() });
-        drawTab(ctx, L.undo, 'undo', 'Undo', { enabled: this.ws.canUndo(), ...best('undo') });
-        drawTab(ctx, L.redo, 'redo', 'Redo', { enabled: this.ws.canRedo(), ...best('redo') });
-        drawTab(ctx, L.scout, 'scout', 'Scout', { enabled: true, ...best('scout') });
-        // Mounted parts and sockets as focusable controls (keyboard editing).
-        const fr = frame;
-        for (const part of fr.parts) {
-          const def = PARTS[part.kind];
-          const [cx, cy] = apply(part.pose, [def.pick.x, def.pick.y]);
-          const r = def.pick.r * this.cam.ppm;
-          controls.push({
-            id: `part:${part.id}`,
-            label: `Fitted ${def.label}${this.sel?.id === part.id ? ', selected' : ''}`,
-            rect: { x: this.cam.sx(cx) - r, y: this.cam.sy(cy) - r, w: r * 2, h: r * 2 },
-            enabled: true,
-            group: 'part',
-            onActivate: () => this.selectMounted(part.id),
-          });
-        }
-        if (this.sel) {
-          for (const t of this.computeTargets(this.sel.kind, this.sel.id, this.sel.rot)) {
-            const ref = t.ref;
-            controls.push({
-              id: `socket:${ref.parent}:${ref.socket}`,
-              label: `${ref.parent === 'chassis' ? `Frame socket ${ref.socket + 1}` : `Socket on ${PARTS[findPlacement(this.ws.bp, ref.parent)?.kind ?? 'spar'].label}`}${t.res.ok ? '' : `: ${t.res.reason}`}`,
-              rect: { x: this.cam.sx(t.x) - 14, y: this.cam.sy(t.y) - 14, w: 28, h: 28 },
-              enabled: true,
-              group: 'socket',
-              onActivate: () => this.placeSelection(ref),
-            });
-          }
-        }
-      }
-      const chk = checkLaunch(this.ws.bp, this.route.kit);
-      controls.push({ id: 'lever', label: chk.ok ? 'Dispatch: pull the lever to launch' : `Dispatch, locked: ${chk.missing}`, rect: L.lever, enabled: chk.ok && this.mode === 'bench', onActivate: () => this.dispatch() });
-      drawLever(ctx, L.lever, {
-        locked: !chk.ok,
-        missing: chk.ok ? null : chk.missing,
-        pull: 0,
-        focus: focused === 'lever',
-        hover: this.hover === 'lever',
-        retract: this.drawerRetract,
-        rattle: this.leverRattle,
-        free: this.leverFree,
-      });
-      if (this.mode === 'scout') {
-        const back: Rect = { x: L.W - 250, y: 110, w: 220, h: 56 };
-        controls.push({ id: 'scout:back', label: 'Back to the bench', rect: back, enabled: true, onActivate: () => this.exitScout() });
-        drawTab(ctx, back, 'back', 'Back to bench', { enabled: true, glyph: 'Esc', primary: true, ...best('scout:back') });
-        ctx.save();
-        ctx.font = `600 ${TYPE.body}px ${FONT_TEXT}`;
-        ctx.fillStyle = C.paper;
-        ctx.textAlign = 'center';
-        ctx.fillText('Scouting · drag to look along the course', L.W / 2, 40);
-        ctx.restore();
-      }
-    } else if (running) {
-      // Drawer retracting away.
-      if (this.drawerRetract < 1) {
-        drawDrawer(ctx, L.drawer, L.recesses, L.trayK, {
-          stock,
-          kit: this.route.kit as Record<PartKind, number>,
-          retract: this.drawerRetract,
-          held: null,
-          selectedKind: null,
-          focus: null,
-          hoverKind: null,
-          res: this.res(),
-          time: this.time,
-          lift: {},
-        });
-        drawLever(ctx, L.lever, { locked: false, missing: null, pull: 1, focus: false, hover: false, retract: this.drawerRetract, rattle: 0, free: 0 });
-      }
-      const show = this.drawerRetract;
-      const sim = this.sim!;
-      drawDial(ctx, L.dial, sim.wind, show, this.time, this.runInput().drive && sim.wind > 0);
-      const input = this.runInput();
-      if (this.mode === 'run' || this.result?.kind === 'rest') {
-        const touch = this.device === 'touch';
-        controls.push({
-          id: 'drive',
-          label: `Drive, ${input.drive ? 'on' : 'off'}`,
-          rect: L.drive,
-          enabled: true,
-          pressed: input.drive,
-          onActivate: () => {
-            this.driveLatched = !this.driveLatched;
-            audio.uiClick();
-          },
-          hold: touch
-            ? {
-                down: () => this.touchDrive.add(1),
-                up: () => this.touchDrive.delete(1),
-              }
-            : undefined,
-        });
-        drawDrive(ctx, L.drive, { on: input.drive, focus: focused === 'drive', hover: this.hover === 'drive', touch, show, hint: false, wind: sim.wind });
-        controls.push({ id: 'lamp:back', label: 'Slide lamp toward the back (hold)', rect: L.lampBack, enabled: true, group: 'lamp', onActivate: () => this.nudgeLamp(-1), hold: { down: () => this.lampHold.back.add(1), up: () => this.lampHold.back.delete(1) } });
-        controls.push({ id: 'lamp:fwd', label: 'Slide lamp toward the nose (hold)', rect: L.lampFwd, enabled: true, group: 'lamp', onActivate: () => this.nudgeLamp(1), hold: { down: () => this.lampHold.fwd.add(1), up: () => this.lampHold.fwd.delete(1) } });
-        drawLampControls(ctx, L.lampBack, L.lampFwd, { back: input.lamp < 0, fwd: input.lamp > 0, show, focusBack: focused === 'lamp:back', focusFwd: focused === 'lamp:fwd' });
-      }
-      this.drawResultActions(ctx, controls, focused);
-    }
-
-    this.drawHints(ctx, frame, focused);
-  }
-
-  /** Keyboard activation of a lamp control nudges for a few ticks. */
-  private nudgeLamp(dir: -1 | 1): void {
-    const key = dir < 0 ? 'KeyA' : 'KeyD';
-    this.keys.add(key);
-    window.setTimeout(() => this.keys.delete(key), 160);
-  }
-
-  private drawResultActions(ctx: CanvasRenderingContext2D, controls: HoldControl[], focused: string | null): void {
-    const L = this.L;
-    const r = this.result;
-    const best = (id: string) => ({ focus: focused === id, hover: this.hover === id, pressed: this.pressed === id });
-    const x = L.W - 262;
-    let y = 104;
-    const add = (id: string, label: string, act: () => void, glyph: string | undefined, primary: boolean) => {
-      const rect: Rect = { x, y, w: 240, h: 56 };
-      controls.push({ id, label, rect, enabled: true, onActivate: act });
-      drawTab(ctx, rect, id === 'act:next' ? 'next' : id === 'act:again' ? 'again' : id === 'act:routes' ? 'routes' : 'back', label, { enabled: true, glyph, primary, ...best(id) });
-      y += 66;
+    const sh = this.shift;
+    const sim = sh.sim;
+    const cur = sim.pose();
+    const prev = sim.prevPose ?? cur;
+    const P = {
+      chassis: lerpPose(prev.chassis, cur.chassis, alpha),
+      rear: lerpPose(prev.rear, cur.rear, alpha),
+      front: lerpPose(prev.front, cur.front, alpha),
     };
-    if (!r || r.kind === 'rest' || this.mode === 'run') {
-      if (this.mode === 'run') {
-        // Retry is one action at any moment.
-        add('act:back', 'Back to bench', () => this.backToBench(), 'R', r?.kind === 'rest');
-        if (r?.kind === 'rest') add('act:again', 'Run again', () => this.runAgain(), undefined, false);
-      }
-    } else if (r.kind === 'delivered') {
-      const next = ROUTES[this.route.index + 1];
-      add('act:next', next ? 'Next window' : 'See the shift', () => this.nextWindow(), 'Enter', true);
-      add('act:again', 'Run again', () => this.runAgain(), undefined, false);
-      add('act:back', 'Back to bench', () => this.backToBench(), 'R', false);
-    } else {
-      add('act:back', 'Back to bench', () => this.backToBench(), 'R', true);
-      add('act:again', 'Run again', () => this.runAgain(), undefined, false);
+    if (!this.paused) this.updateCamera(P.chassis);
+    const cam = this.cam;
+    const sk = this.fx.shakeOffset(this.t);
+    this.hits = [];
+
+    this.art.drawBackground(ctx, cam, this.t, this.dpr);
+    worldTransform(ctx, cam, sk.x, sk.y);
+    const px = 1 / cam.ppm;
+    this.drawWindowsBack(ctx);
+    this.art.drawStanding(ctx, cam, this.t);
+    this.art.drawTerrain(ctx, cam, px);
+    // letters
+    for (const l of sh.course.letters) {
+      if (sh.got.has(l.id) || Math.abs(l.x - cam.x) > cam.W / cam.ppm) continue;
+      drawLetter(ctx, l.x, l.y, this.t, l.id);
     }
-    void L;
+    this.drawWindowsFront(ctx);
+    this.drawCart(ctx, P);
+    this.fx.drawWorld(ctx);
+    this.drawPostEmbers(ctx);
+
+    // screen space
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.drawSpeedLines(ctx);
+    this.drawWorldLabels(ctx, P);
+    this.fx.drawPops(ctx, cam, this.s);
+    this.drawPostTallies(ctx);
+    if (this.mode === 'drive' || this.mode === 'results' || this.mode === 'intro') this.drawHud(ctx);
+    if (this.input.touchUI && (this.mode === 'drive' || this.mode === 'title' || this.mode === 'intro')) this.drawPads(ctx);
+    this.drawHint(ctx);
+    if (this.mode === 'title') this.drawTitle(ctx);
+    if (this.mode === 'intro') this.drawIntro(ctx);
+    if (this.mode === 'results' && this.finishInfo) this.drawResults(ctx);
+    if (this.mode === 'shop') this.drawShop(ctx);
+    if (this.mode === 'over') this.drawOver(ctx);
+    if (this.mode === 'dawn') this.drawDawn(ctx);
+    if (this.paused) this.drawPause(ctx);
   }
 
-  private drawHints(ctx: CanvasRenderingContext2D, frame: CartFrame, focused: string | null): void {
+  private drawSpeedLines(ctx: CanvasRenderingContext2D): void {
+    if (this.fx.reduced || this.mode !== 'drive') return;
+    const v = this.shift.sim.chassis.getLinearVelocity();
+    const sp = Math.hypot(v.x, v.y);
+    if (sp < 11) return;
+    const k = Math.min(1, (sp - 11) / 6);
+    const W = this.cam.W;
+    const H = this.cam.H;
+    ctx.strokeStyle = `rgba(255,241,207,${0.25 * k})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < 14; i++) {
+      const seed = (i * 7919) % 101;
+      const y = ((seed / 101) * H * 0.9 + H * 0.05) | 0;
+      const len = 60 + (seed % 5) * 30;
+      const x = W - (((this.t * (900 + seed * 6)) + seed * 97) % (W + len * 2));
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + len * k, y - (v.y / Math.max(1, Math.abs(v.x))) * len * k * 0.5);
+    }
+    ctx.stroke();
+  }
+
+  private drawCart(ctx: CanvasRenderingContext2D, P: { chassis: Pose; rear: Pose; front: Pose }): void {
+    const sh = this.shift;
+    const sim = sh.sim;
+    const parts = new Set(this.run.parts);
+    const wheelKind = this.run.parts.find((p) => PARTS[p].slot === 'wheels') ?? null;
+    const c = P.chassis;
+    // contact shadow
+    const g = groundAt(sh.course, c.x);
+    if (g !== null) {
+      const h = Math.max(0, c.y - g);
+      ctx.fillStyle = `rgba(26,18,51,${Math.max(0, 0.35 - h * 0.04)})`;
+      ctx.beginPath();
+      ctx.ellipse(c.x, g + 0.02, 1.2 + h * 0.1, 0.12, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const cos = Math.cos(c.a);
+    const sin = Math.sin(c.a);
+    const wp = (o: { x: number; y: number }) => ({ x: c.x + o.x * cos - o.y * sin, y: c.y + o.x * sin + o.y * cos });
+    const soft = parts.has('bedspring');
+    if (!sim.crashed || sh.crashTimer === 0) {
+      const ar = wp(AXLE_R);
+      const af = wp(AXLE_F);
+      drawStrut(ctx, ar.x, ar.y + 0.12, P.rear.x, P.rear.y, soft);
+      drawStrut(ctx, af.x, af.y + 0.12, P.front.x, P.front.y, soft);
+    }
+    for (const w of [P.rear, P.front]) {
+      ctx.save();
+      ctx.translate(w.x, w.y);
+      ctx.rotate(w.a);
+      drawWheel(ctx, sim.spec.wheelR, wheelKind);
+      ctx.restore();
+    }
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.a);
+    const flame = sh.flame;
+    const target = sim.crashed ? 0 : flame.size;
+    this.flameShown += (target - this.flameShown) * ease(0.12, this.fdt);
+    this.blinkT -= this.fdt;
+    if (this.blinkT < -0.12) this.blinkT = 2 + Math.random() * 3;
+    const v = sim.chassis.getLinearVelocity();
+    let mood = this.mood;
+    if (sim.airborne) mood = v.y < -8 && flame.size > 0.5 ? -0.6 : 0.6;
+    this.mood += (0 - this.mood) * ease(0.02, this.fdt);
+    const look: CartLook = {
+      t: this.t,
+      flame: this.flameShown,
+      dead: sim.crashed,
+      lean: sim.lean,
+      sparks: flame.sparks,
+      wheels: wheelKind,
+      parts,
+      airborne: sim.airborne,
+      mood,
+      blink: this.blinkT < 0,
+      cracked: flame.size > 0.85 ? 2 : flame.size > 0.55 ? 1 : 0,
+    };
+    drawCartBody(ctx, look);
+    ctx.restore();
+    // sparks orbiting the lamp
+    if (!sim.crashed && flame.sparks > 1) {
+      const lamp = sim.lampWorld();
+      const n = flame.sparks - 1;
+      this.sparkAngle += (0.05 + n * 0.004) * this.fdt * 60;
+      for (let i = 0; i < Math.min(n, 24); i++) {
+        const a = this.sparkAngle + (i / Math.min(n, 24)) * Math.PI * 2;
+        const r = 0.75 + 0.12 * Math.sin(this.t * 5 + i);
+        const x = lamp.x + Math.cos(a) * r;
+        const y = lamp.y + 0.35 + Math.sin(a) * r * 0.75;
+        ctx.beginPath();
+        ctx.arc(x, y, 0.09, 0, Math.PI * 2);
+        ctx.fillStyle = C.fireHot;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(x, y, 0.16, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,200,60,0.35)';
+        ctx.fill();
+      }
+    }
+  }
+
+  private windowTone(w: WindowSpot): string {
+    const tones = [C.teal, C.blue, C.red, C.pink, C.green];
+    return tones[w.id % tones.length];
+  }
+
+  private drawWindowsBack(ctx: CanvasRenderingContext2D): void {
+    const sh = this.shift;
     const cam = this.cam;
-    const L = this.L;
-    const glyphFor = (what: 'drive' | 'fwd') => (this.device === 'keyboard' ? (what === 'drive' ? 'Space' : 'D') : this.device === 'touch' ? (what === 'drive' ? 'HOLD' : '▶') : what === 'drive' ? 'DRIVE' : '▶');
-    // One contextual hint at a time, in priority order.
-    if (this.mode === 'bench') {
-      if (this.rejectAt) {
-        paperNote(ctx, this.rejectAt.reason, cam.sx(this.rejectAt.x) + 26, cam.sy(this.rejectAt.y) - 62, { leader: [cam.sx(this.rejectAt.x), cam.sy(this.rejectAt.y) - 12], size: TYPE.body, seed: 3 });
-        return;
+    for (const w of sh.course.windows) {
+      if (Math.abs(w.x - cam.x) > cam.W / cam.ppm + 6) continue;
+      if (w.final) {
+        this.drawOffice(ctx, w);
+        continue;
       }
-      if (this.drag?.active && this.target && !this.target.res.ok) {
-        paperNote(ctx, this.target.res.reason, cam.sx(this.target.x) + 26, cam.sy(this.target.y) - 64, { leader: [cam.sx(this.target.x), cam.sy(this.target.y) - 12], size: TYPE.body, seed: 4 });
-        return;
+      if (w.high) continue;
+      // post
+      ctx.fillStyle = C.ink;
+      ctx.fillRect(w.x - 0.09, w.y - 0.3, 0.18, 3.1);
+      ctx.fillStyle = C.mustardDark;
+      ctx.fillRect(w.x - 0.04, w.y - 0.3, 0.08, 3.1);
+    }
+  }
+
+  private drawWindowsFront(ctx: CanvasRenderingContext2D): void {
+    const sh = this.shift;
+    const cam = this.cam;
+    const inRange = sh.windowInRange();
+    for (const w of sh.course.windows) {
+      if (w.final || Math.abs(w.x - cam.x) > cam.W / cam.ppm + 6) continue;
+      const lit = sh.lit.has(w.id) ? 1 : 0;
+      const post = this.posts.find((p) => p.w.id === w.id);
+      const litK = post ? Math.min(1, Math.max(0, (post.t - 0.32) * 6)) : lit;
+      const hot = inRange?.id === w.id && sh.flame.alive && this.mode === 'drive';
+      ctx.save();
+      if (w.high) {
+        // hanging by a string
+        ctx.beginPath();
+        ctx.moveTo(w.x, w.y + 1.2);
+        ctx.lineTo(w.x, w.y + 30);
+        ctx.lineWidth = 0.05;
+        ctx.strokeStyle = C.cream;
+        ctx.stroke();
+        ctx.translate(w.x, w.y - 0.9);
+        ctx.rotate(Math.sin(this.t * 1.5 + w.id) * 0.05);
+        const sc = 1 + (hot ? Math.sin(this.t * 14) * 0.04 : 0);
+        ctx.scale(sc, sc);
+        drawHouse(ctx, 1.5, 2.1, litK, this.t, hot, C.mustard);
+      } else {
+        ctx.translate(w.x, w.y + 2.7);
+        const sc = 1 + (hot ? Math.sin(this.t * 14) * 0.04 : 0);
+        ctx.scale(sc, sc);
+        drawHouse(ctx, 1.6, 2.2, litK, this.t, hot, this.windowTone(w));
       }
-      if (this.leverNote > 0) {
-        const chk = checkLaunch(this.ws.bp, this.route.kit);
-        if (!chk.ok) {
-          paperNote(ctx, chk.missing, L.lever.x - 10, L.lever.y + 20, { leader: [L.lever.x + 40, L.lever.y + 80], size: TYPE.hint, seed: 8, maxW: 200 });
-          // Point at the precise missing part in the drawer as well.
-          if (chk.kind) {
-            const rec = L.recesses.find((x) => x.kind === chk.kind);
-            if (rec) focusRing(ctx, rec.r, 10);
-          }
-          return;
-        }
-      }
-      const sel = this.drag?.active ? this.drag.kind : this.sel?.kind;
-      if (sel && !this.drag?.active) {
-        const rec = L.recesses.find((x) => x.kind === sel);
-        const ax = rec ? rec.r.x + rec.r.w / 2 : L.W / 2;
-        paperNote(ctx, PARTS[sel].blurb, Math.min(L.W - 520, Math.max(20, ax - 120)), L.drawer.y - 56, { leader: rec && this.sel?.from === 'tray' ? [ax, L.drawer.y + 6] : null, size: TYPE.body, maxW: 440, seed: 11 });
-        return;
-      }
-      const stock = this.ws.stock();
-      if (!this.drag && stock.keyWheel > 0 && !this.everFitKey && !this.ws.bp.placements.some((p) => p.kind === 'keyWheel')) {
-        // "Fit the key wheel" beside the empty mount.
-        const ts = this.computeTargets('keyWheel', undefined, undefined).filter((t) => t.res.ok);
-        const t = ts[0];
-        if (t) {
-          const sx = cam.sx(t.x);
-          const sy = cam.sy(t.y);
-          paperNote(ctx, 'Fit the key wheel', sx - 250, sy - 150, { leader: [sx, sy], size: TYPE.hint + 2, seed: 2 });
-        }
-        return;
+      ctx.restore();
+    }
+  }
+
+  private drawOffice(ctx: CanvasRenderingContext2D, w: WindowSpot): void {
+    const x = w.x;
+    const y = w.y;
+    const lit = this.shift.done ? 1 : 0;
+    // building
+    ctx.beginPath();
+    ctx.moveTo(x - 4.5, y);
+    ctx.lineTo(x - 4.5, y + 5.5);
+    ctx.lineTo(x, y + 8);
+    ctx.lineTo(x + 4.5, y + 5.5);
+    ctx.lineTo(x + 4.5, y);
+    ctx.closePath();
+    inked(ctx, C.red, 0.1);
+    // roof trim
+    ctx.beginPath();
+    ctx.moveTo(x - 5, y + 5.3);
+    ctx.lineTo(x, y + 8.3);
+    ctx.lineTo(x + 5, y + 5.3);
+    ctx.lineWidth = 0.35;
+    ctx.strokeStyle = C.ink;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+    ctx.lineWidth = 0.18;
+    ctx.strokeStyle = C.cream;
+    ctx.stroke();
+    // sign board
+    rr(ctx, x - 3, y + 4.4, 6, 1.1, 0.15);
+    inked(ctx, C.cream, 0.08);
+    // big door/window
+    const g = ctx.createRadialGradient(x, y + 2, 0.2, x, y + 2, 6);
+    if (lit) {
+      g.addColorStop(0, 'rgba(255,214,90,0.7)');
+      g.addColorStop(1, 'rgba(255,214,90,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(x - 6, y - 4, 12, 12);
+    }
+    ctx.beginPath();
+    ctx.moveTo(x - 1.6, y);
+    ctx.lineTo(x - 1.6, y + 2.4);
+    ctx.arc(x, y + 2.4, 1.6, Math.PI, 0, true);
+    ctx.lineTo(x + 1.6, y);
+    ctx.closePath();
+    inked(ctx, lit ? C.fire : C.ink, 0.1);
+    for (const dx of [-3.3, 3.3]) {
+      rr(ctx, x + dx - 0.6, y + 1.8, 1.2, 1.5, 0.2);
+      inked(ctx, lit ? C.fire : C.inkSoft, 0.08);
+    }
+  }
+
+  private drawPostEmbers(ctx: CanvasRenderingContext2D): void {
+    for (const p of this.posts) {
+      if (p.t > 0.32) continue;
+      const k = p.t / 0.32;
+      const wy = p.w.high ? p.w.y : p.w.y + 3.6;
+      const x = lerp(p.fromX, p.w.x, k);
+      const y = lerp(p.fromY, wy, k) + Math.sin(k * Math.PI) * 2;
+      drawFlame(ctx, x, y - 0.3, 0.5, this.t);
+      this.fx.burst(x, y, 1, 'spark', C.fire, 1, 0.1, 0.3, 0);
+    }
+  }
+
+  private drawWorldLabels(ctx: CanvasRenderingContext2D, P: { chassis: Pose }): void {
+    const sh = this.shift;
+    const s = this.s;
+    if (this.mode !== 'drive' && this.mode !== 'results') return;
+    // sign on the sorting office
+    const fin = sh.course.windows.find((w) => w.final);
+    if (fin && Math.abs(fin.x - this.cam.x) < this.cam.W / this.cam.ppm) {
+      const sp = toScreen(this.cam, fin.x, fin.y + 4.95);
+      text(ctx, 'SORTING OFFICE', sp.x, sp.y, this.cam.ppm * 0.75, C.red, 'center');
+    }
+    // flame readout over the cart
+    const flame = sh.flame;
+    if (!sh.sim.crashed && flame.alive) {
+      const sp = toScreen(this.cam, P.chassis.x, P.chassis.y + 2.0);
+      const fragile = 1 - sh.tolerance() / (BASE_TOLERANCE * sh.tolMul);
+      const col = fragile > 0.3 ? C.fireRed : fragile > 0.15 ? C.fireOrange : C.fire;
+      const wob = fragile > 0.3 && !this.fx.reduced ? Math.sin(this.t * 30) * 2 * s : 0;
+      text(ctx, fmt(flame.heat), sp.x + wob, sp.y, 34 * s, col, 'center', 7 * s);
+      text(ctx, `${flame.sparks} spark${flame.sparks > 1 ? 's' : ''}`, sp.x, sp.y + 26 * s, 17 * s, C.fireHot, 'center', 5 * s);
+      if (sh.live && sh.live.heat > 0) text(ctx, sh.live.label.toUpperCase(), sp.x, sp.y - 30 * s, 20 * s, C.cream, 'center', 5 * s);
+    } else if (sh.live && !sh.sim.crashed) {
+      const sp = toScreen(this.cam, P.chassis.x, P.chassis.y + 2.0);
+      text(ctx, sh.live.label.toUpperCase(), sp.x, sp.y, 22 * s, C.cream, 'center', 5 * s);
+    }
+    // post prompt over the window in range
+    const w = sh.windowInRange();
+    if (w && this.mode === 'drive') {
+      const wy = w.high ? w.y + 2.0 : w.y + 5.8;
+      const sp = toScreen(this.cam, w.x, wy);
+      const bounce = this.fx.reduced ? 0 : Math.abs(Math.sin(this.t * 8)) * 6 * s;
+      if (flame.alive) {
+        const pv = flame.postValue({ high: w.high, airborne: sh.sim.airborne });
+        const key = this.input.touchUI ? 'TAP POST' : 'SPACE';
+        const r = { x: sp.x - 95 * s, y: sp.y - 40 * s - bounce, w: 190 * s, h: 62 * s };
+        panel(ctx, r, C.mustard, s * 0.8);
+        text(ctx, `POST! · ${key}`, sp.x, r.y + 20 * s, 22 * s, C.ink, 'center');
+        text(ctx, `= ${fmt(pv.value)}${pv.mult > 1 ? `  (×${pv.mult})` : ''}`, sp.x, r.y + 44 * s, 20 * s, C.redDark, 'center');
       }
     }
-    if (this.mode === 'run' && this.sim) {
-      if (this.shiftHintActive && !this.hints.shift) {
-        const lx = cam.sx(frame.lamp.x);
-        const ly = cam.sy(frame.lamp.y) - 0.62 * cam.ppm;
-        paperNote(ctx, 'Shift lamp forward', lx + 40, ly - 30, { leader: [lx + 8, ly + 6], size: TYPE.hint, glyph: glyphFor('fwd'), seed: 13 });
+  }
+
+  private drawPostTallies(ctx: CanvasRenderingContext2D): void {
+    const s = this.s;
+    for (const p of this.posts) {
+      if (p.t < 0.32 || p.landed) continue;
+      // the tally sits under the meter so the camera can keep driving
+      const sp = { x: this.cam.W / 2, y: 150 * s };
+      if (p.fly > 0) {
+        const k = p.fly * p.fly;
+        const x = lerp(sp.x, this.cam.W / 2, k);
+        const y = lerp(sp.y + 22 * s, 48 * s, k) - Math.sin(p.fly * Math.PI) * 60 * s;
+        text(ctx, `+${fmt(p.value)}`, x, y, (40 - 16 * k) * s, C.fire, 'center', 6 * s);
+        continue;
+      }
+      const intro = Math.min(1, (p.t - 0.32) / 0.15);
+      const sc = this.fx.reduced ? 1 : 0.6 + intro * 0.4 + (p.sparkI > 0 ? Math.sin(p.t * 40) * 0.015 : 0);
+      ctx.save();
+      ctx.translate(sp.x, sp.y);
+      ctx.scale(sc, sc);
+      ctx.rotate(-0.03);
+      const r = { x: -120 * s, y: -46 * s, w: 240 * s, h: 92 * s };
+      panel(ctx, r, C.cream, s);
+      text(ctx, `${fmt(p.heat)} heat`, 0, -26 * s, 18 * s, C.inkSoft, 'center');
+      // spark pips
+      const n = p.sparks;
+      const pipW = Math.min(16 * s, (200 * s) / Math.max(1, n));
+      for (let i = 0; i < n; i++) {
+        const x = -((n - 1) * pipW) / 2 + i * pipW;
+        ctx.beginPath();
+        ctx.arc(x, -8 * s, Math.min(6 * s, pipW * 0.4), 0, Math.PI * 2);
+        ctx.fillStyle = i < p.sparkI ? C.fire : 'rgba(26,18,51,0.2)';
+        ctx.fill();
+        if (i < p.sparkI) {
+          ctx.lineWidth = 1.5 * s;
+          ctx.strokeStyle = C.fireOrange;
+          ctx.stroke();
+        }
+      }
+      text(ctx, fmt(p.shown), 0, 22 * s, 36 * s, C.red, 'center', 5 * s);
+      for (let i = 0; i < p.partI; i++) text(ctx, p.parts[i], 0, 60 * s + i * 24 * s, 18 * s, C.mustard, 'center', 5 * s);
+      ctx.restore();
+    }
+  }
+
+  // ---------------------------------------------------------------- HUD
+
+  private drawHud(ctx: CanvasRenderingContext2D): void {
+    const s = this.s;
+    const W = this.cam.W;
+    const sh = this.shift;
+    const target = sh.cfg.target;
+    // postage meter, top centre
+    const mw = Math.min(W - 280 * s, 560 * s);
+    const mx = W / 2 - mw / 2;
+    const my = 14 * s;
+    const bump = this.meterBump * 6 * s;
+    panel(ctx, { x: mx, y: my - bump / 2, w: mw, h: 64 * s + bump }, C.cream, s);
+    text(ctx, `SHIFT ${this.run.shift}/${SHIFTS}`, mx + 14 * s, my + 18 * s, 18 * s, C.redDark);
+    const posted = this.shownPosted;
+    const met = posted >= target;
+    text(ctx, `${fmt(posted)} / ${fmt(target)}`, mx + mw - 14 * s, my + 18 * s, 22 * s, met ? C.greenDark : C.ink, 'right');
+    // bar
+    const bx = mx + 14 * s;
+    const by = my + 34 * s;
+    const bw = mw - 28 * s;
+    const bh = 18 * s;
+    rr(ctx, bx, by, bw, bh, 6 * s);
+    ctx.fillStyle = 'rgba(26,18,51,0.12)';
+    ctx.fill();
+    const k = Math.min(1, posted / target);
+    if (k > 0) {
+      rr(ctx, bx, by, Math.max(bh, bw * k), bh, 6 * s);
+      ctx.fillStyle = met ? C.green : C.fire;
+      ctx.fill();
+    }
+    // projected: what posting now would add (ghost)
+    const ghost = sh.flame.alive ? Math.min(1, (posted + sh.flame.heat * sh.flame.sparks) / target) : 0;
+    if (ghost > k) {
+      ctx.fillStyle = 'rgba(255,138,31,0.35)';
+      ctx.fillRect(bx + bw * k, by + 3 * s, bw * (ghost - k), bh - 6 * s);
+    }
+    rr(ctx, bx, by, bw, bh, 6 * s);
+    ctx.lineWidth = 3 * s;
+    ctx.strokeStyle = C.ink;
+    ctx.stroke();
+    // course strip: where the windows are
+    const course = sh.course;
+    const span = course.endX - course.startX;
+    const cy = my + 64 * s + 14 * s;
+    ctx.fillStyle = 'rgba(255,241,207,0.35)';
+    ctx.fillRect(bx, cy - 1 * s, bw, 3 * s);
+    for (const w of course.windows) {
+      const x = bx + ((w.x - course.startX) / span) * bw;
+      const lit = sh.lit.has(w.id);
+      const skipped = sh.skipped.has(w.id);
+      ctx.beginPath();
+      if (w.final) ctx.rect(x - 6 * s, cy - 8 * s, 12 * s, 14 * s);
+      else {
+        ctx.moveTo(x - 5 * s, cy + 5 * s);
+        ctx.lineTo(x - 5 * s, cy - 2 * s);
+        ctx.lineTo(x, cy - (w.high ? 11 : 7) * s);
+        ctx.lineTo(x + 5 * s, cy - 2 * s);
+        ctx.lineTo(x + 5 * s, cy + 5 * s);
+        ctx.closePath();
+      }
+      ctx.fillStyle = lit ? C.fire : skipped ? 'rgba(26,18,51,0.6)' : w.final ? C.red : w.high ? C.mustard : C.cream;
+      ctx.fill();
+      ctx.lineWidth = 2 * s;
+      ctx.strokeStyle = C.ink;
+      ctx.stroke();
+    }
+    const cxp = bx + Math.max(0, Math.min(1, (sh.sim.pos.x - course.startX) / span)) * bw;
+    ctx.beginPath();
+    ctx.arc(cxp, cy, 6 * s, 0, Math.PI * 2);
+    ctx.fillStyle = C.red;
+    ctx.fill();
+    ctx.lineWidth = 2.5 * s;
+    ctx.strokeStyle = C.ink;
+    ctx.stroke();
+
+    // glasses, top left
+    for (let i = 0; i < this.run.glassesMax; i++) {
+      const x = 26 * s + i * 34 * s;
+      const y = 30 * s;
+      const ok = i < sh.glasses;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.globalAlpha = ok ? 1 : 0.35;
+      ctx.beginPath();
+      ctx.moveTo(-8 * s, 14 * s);
+      ctx.bezierCurveTo(-16 * s, 4 * s, -12 * s, -8 * s, -6 * s, -16 * s);
+      ctx.lineTo(6 * s, -16 * s);
+      ctx.bezierCurveTo(12 * s, -8 * s, 16 * s, 4 * s, 8 * s, 14 * s);
+      ctx.closePath();
+      ctx.fillStyle = ok ? 'rgba(200,235,255,0.5)' : 'rgba(26,18,51,0.5)';
+      ctx.fill();
+      ctx.lineWidth = 3 * s;
+      ctx.strokeStyle = C.ink;
+      ctx.stroke();
+      if (ok) {
+        ctx.beginPath();
+        ctx.moveTo(0, 10 * s);
+        ctx.quadraticCurveTo(-6 * s, 2 * s, 0, -8 * s);
+        ctx.quadraticCurveTo(6 * s, 2 * s, 0, 10 * s);
+        ctx.fillStyle = C.fire;
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(-6 * s, -6 * s);
+        ctx.lineTo(4 * s, 2 * s);
+        ctx.lineTo(-2 * s, 8 * s);
+        ctx.strokeStyle = C.cream;
+        ctx.lineWidth = 2 * s;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    // pause button and pennies, top right
+    const pr = { x: W - 56 * s, y: 12 * s, w: 44 * s, h: 44 * s };
+    panel(ctx, pr, C.cream, s * 0.8);
+    ctx.fillStyle = C.ink;
+    ctx.fillRect(pr.x + 14 * s, pr.y + 12 * s, 6 * s, 20 * s);
+    ctx.fillRect(pr.x + 25 * s, pr.y + 12 * s, 6 * s, 20 * s);
+    this.hits.push({ r: pr, id: 'pause' });
+    coin(ctx, W - 130 * s, 34 * s, 13 * s);
+    text(ctx, `${this.run.pennies}`, W - 110 * s, 35 * s, 26 * s, C.mustard, 'left', 5 * s);
+    // owned stamps
+    this.run.stamps.forEach((id, i) => {
+      const r = { x: W - 64 * s - i * 40 * s - 30 * s, y: 64 * s, w: 34 * s, h: 40 * s };
+      drawStamp(ctx, r, STAMPS[id], s * 0.35, false, this.t, (i % 2 ? 0.05 : -0.05));
+    });
+    if (sh.cfg.rule) {
+      const rt = RULE_TEXT[sh.cfg.rule];
+      text(ctx, `SUPERVISOR: ${rt.name.toUpperCase()}`, 16 * s, 66 * s, 16 * s, C.pink, 'left', 4 * s);
+    }
+  }
+
+  private drawPads(ctx: CanvasRenderingContext2D): void {
+    const s = Math.max(0.8, this.s);
+    const W = this.cam.W;
+    const H = this.cam.H;
+    const r = 52 * s;
+    const pads = this.input.pads;
+    pads.brake = { x: 30 * s + r, y: H - 30 * s - r, r };
+    pads.gas = { x: W - 30 * s - r, y: H - 30 * s - r, r };
+    pads.post = { x: W - 30 * s - r * 3.4, y: H - 30 * s - r * 0.9, r: r * 0.8 };
+    const draw = (z: 'gas' | 'brake' | 'post', label: string, col: string) => {
+      const p = pads[z];
+      const held = this.input.isTouchHeld(z);
+      ctx.globalAlpha = held ? 0.95 : 0.7;
+      ctx.beginPath();
+      ctx.arc(p.x + 4 * s, p.y + 5 * s, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = C.ink;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(p.x, p.y + (held ? 3 * s : 0), p.r, 0, Math.PI * 2);
+      ctx.fillStyle = col;
+      ctx.fill();
+      ctx.lineWidth = 4 * s;
+      ctx.strokeStyle = C.ink;
+      ctx.stroke();
+      text(ctx, label, p.x, p.y + (held ? 3 * s : 0), p.r * 0.5, C.cream, 'center', 4 * s);
+      ctx.globalAlpha = 1;
+    };
+    draw('brake', '◀', C.blue);
+    draw('gas', '▶', C.red);
+    if (this.mode === 'drive') draw('post', 'POST', C.mustardDark);
+  }
+
+  private drawHint(ctx: CanvasRenderingContext2D): void {
+    if (!this.hint || this.mode === 'shop' || this.paused) return;
+    this.hint.t += this.fdt;
+    if (this.hint.t > 9 && this.hint.id !== 'drive') {
+      this.retireHint(this.hint.id);
+      return;
+    }
+    const s = this.s;
+    const W = this.cam.W;
+    const H = this.cam.H;
+    ctx.font = `600 ${Math.round(20 * s)}px ${BODY}`;
+    const tw = ctx.measureText(this.hint.text).width;
+    const w = tw + 40 * s;
+    const y = this.input.touchUI ? H - 200 * s : H - 90 * s;
+    const bob = this.fx.reduced ? 0 : Math.sin(this.t * 3) * 3 * s;
+    panel(ctx, { x: W / 2 - w / 2, y: y + bob, w, h: 46 * s }, C.paper, s, -0.01);
+    ctx.fillStyle = C.ink;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(this.hint.text, W / 2, y + bob + 24 * s);
+  }
+
+  // ---------------------------------------------------------------- overlays
+
+  private dim(ctx: CanvasRenderingContext2D, a: number): void {
+    ctx.fillStyle = `rgba(14,10,40,${a})`;
+    ctx.fillRect(0, 0, this.cam.W, this.cam.H);
+  }
+
+  private drawTitle(ctx: CanvasRenderingContext2D): void {
+    const s = this.s;
+    const W = this.cam.W;
+    const H = this.cam.H;
+    logo(ctx, W / 2, H * 0.2, Math.min(110 * s, W / 11), this.t, this.fx.reduced);
+    text(ctx, 'NIGHT RUN', W / 2, H * 0.2 + 82 * s, 30 * s, C.mustard, 'center', 6 * s);
+    const lines = ['Pull tricks to grow your lamp’s flame.', 'Post it into the dark windows to score.', 'Bigger flame, bigger postage — but it blows out on hard landings.'];
+    lines.forEach((l, i) => text(ctx, l, W / 2, H * 0.2 + 122 * s + i * 26 * s, 20 * s, C.cream, 'center', 5 * s, BODY, 600));
+    if (this.save.best > 0) text(ctx, `Best night: ${fmt(this.save.best)}  ·  furthest shift: ${this.save.bestShift}`, W / 2, H - 30 * s, 17 * s, C.paper, 'center', 4 * s, BODY, 600);
+    text(ctx, `M: sound ${this.save.muted ? 'off' : 'on'}`, 16 * s, H - 24 * s, 15 * s, C.paper, 'left', 4 * s, BODY, 600);
+  }
+
+  private drawIntro(ctx: CanvasRenderingContext2D): void {
+    const s = this.s;
+    const W = this.cam.W;
+    const H = this.cam.H;
+    const sh = this.shift;
+    const w = 420 * s;
+    const h = sh.cfg.rule ? 170 * s : 120 * s;
+    const r = { x: W / 2 - w / 2, y: H * 0.2, w, h };
+    panel(ctx, r, C.cream, s, -0.015);
+    text(ctx, `SHIFT ${this.run.shift}`, W / 2, r.y + 34 * s, 40 * s, C.red, 'center');
+    text(ctx, `Post ${fmt(sh.cfg.target)} before the sorting office`, W / 2, r.y + 74 * s, 20 * s, C.ink, 'center', 0, BODY, 600);
+    if (sh.cfg.rule) {
+      const rt = RULE_TEXT[sh.cfg.rule];
+      text(ctx, `SUPERVISOR — ${rt.name.toUpperCase()}`, W / 2, r.y + 112 * s, 22 * s, C.pink, 'center', 4 * s);
+      text(ctx, rt.text, W / 2, r.y + 140 * s, 18 * s, C.inkSoft, 'center', 0, BODY, 600);
+    }
+    text(ctx, this.input.touchUI ? 'Hold ▶ to go' : 'Hold → to go', W / 2, r.y + h + 34 * s, 22 * s, C.mustard, 'center', 5 * s);
+  }
+
+  private drawResults(ctx: CanvasRenderingContext2D): void {
+    const f = this.finishInfo!;
+    const s = this.s;
+    const W = this.cam.W;
+    const H = this.cam.H;
+    const k = Math.min(1, this.modeT / 0.3);
+    this.dim(ctx, 0.45 * k);
+    const w = 440 * s;
+    const h = (230 + f.lines.length * 30) * s;
+    const r = { x: W / 2 - w / 2, y: H / 2 - h / 2 + (1 - k) * 60 * s, w, h };
+    panel(ctx, r, C.cream, s, 0.01);
+    text(ctx, 'SHIFT DELIVERED', W / 2, r.y + 36 * s, 38 * s, C.greenDark, 'center');
+    text(ctx, `${fmt(f.posted)} posted of ${fmt(f.target)}`, W / 2, r.y + 76 * s, 22 * s, C.ink, 'center', 0, BODY, 600);
+    let y = r.y + 116 * s;
+    f.lines.forEach(([label, n], i) => {
+      const show = this.modeT > 0.35 + i * 0.18;
+      if (!show) return;
+      text(ctx, label, r.x + 40 * s, y, 20 * s, C.inkSoft, 'left', 0, BODY, 600);
+      coin(ctx, r.x + w - 70 * s, y, 10 * s);
+      text(ctx, `+${n}`, r.x + w - 52 * s, y + 1, 22 * s, C.ink, 'left');
+      y += 30 * s;
+    });
+    const br = { x: W / 2 - 150 * s, y: r.y + h - 76 * s, w: 300 * s, h: 56 * s };
+    const last = this.run.shift >= SHIFTS;
+    button(ctx, br, last ? 'SEE THE DAWN' : 'TO THE COUNTER', s, inside(br, this.input.mouse.x, this.input.mouse.y), C.red, true, this.input.touchUI ? '' : '⏎');
+    this.hits.push({ r: br, id: 'continue' });
+  }
+
+  private drawShop(ctx: CanvasRenderingContext2D): void {
+    const s = this.s;
+    const W = this.cam.W;
+    const H = this.cam.H;
+    const t = this.t;
+    this.dim(ctx, 0.7);
+    // counter top
+    ctx.fillStyle = '#7a3f2e';
+    ctx.fillRect(0, H * 0.74, W, H * 0.26);
+    ctx.fillStyle = '#a0583c';
+    ctx.fillRect(0, H * 0.74, W, 12 * s);
+    ctx.fillStyle = C.ink;
+    ctx.fillRect(0, H * 0.74 + 12 * s, W, 4 * s);
+    text(ctx, 'THE NIGHT COUNTER', W / 2, 44 * s, 46 * s, C.mustard, 'center', 8 * s);
+    text(ctx, `Shift ${this.run.shift + 1} needs ${fmt(targetFor(this.run.shift + 1))} postage`, W / 2, 82 * s, 19 * s, C.cream, 'center', 4 * s, BODY, 600);
+    // pennies
+    coin(ctx, W - 120 * s, 44 * s, 16 * s);
+    text(ctx, `${this.run.pennies}`, W - 96 * s, 46 * s, 34 * s, C.mustard, 'left', 6 * s);
+
+    // offers
+    const stamps = this.offers.filter((o) => o.kind === 'stamp');
+    const parts = this.offers.filter((o) => o.kind === 'part');
+    const sw = Math.min(150 * s, (W - 80 * s) / 6);
+    const shh = sw * 1.2;
+    const tw = Math.min(250 * s, (W - 80 * s) / 3.6);
+    const th = 120 * s;
+    const total = stamps.length * (sw + 22 * s) + parts.length * (tw + 22 * s);
+    let x = W / 2 - total / 2;
+    const y = 120 * s;
+    let sel: { title: string; body: string; price: number; i: number; owned?: boolean } | null = null;
+    this.offers.forEach((o, i) => {
+      const isStamp = o.kind === 'stamp';
+      const r = isStamp ? { x, y, w: sw, h: shh } : { x, y: y + (shh - th) / 2, w: tw, h: th };
+      x += (isStamp ? sw : tw) + 22 * s;
+      if (o.sold) {
+        text(ctx, 'SOLD', r.x + r.w / 2, r.y + r.h / 2, 30 * s, 'rgba(255,241,207,0.4)', 'center');
         return;
       }
-      if (!this.hints.drive && this.runT < 12) {
-        if (this.device === 'keyboard') {
-          const cx = cam.sx(frame.chassis.x);
-          const cy = cam.sy(frame.chassis.y) - 1.6 * cam.ppm;
-          paperNote(ctx, 'Hold to drive', cx - 60, cy, { size: TYPE.hint, glyph: glyphFor('drive'), seed: 14 });
-        } else {
-          const r = L.drive;
-          paperNote(ctx, this.device === 'touch' ? 'Hold DRIVE to wind forward' : 'Click DRIVE to latch it on', r.x - 250, r.y + 30, { leader: [r.x - 4, r.y + 40], size: TYPE.hint, seed: 15, maxW: 220 });
-          focusRing(ctx, r, 12);
-        }
-        return;
+      const hot = inside(r, this.input.mouse.x, this.input.mouse.y) || (this.selected?.kind === 'offer' && this.selected.i === i);
+      const tilt = ((i * 53) % 7) / 7 - 0.5;
+      if (isStamp) drawStamp(ctx, r, STAMPS[o.id as StampId], s, hot, t, tilt * 0.08);
+      else drawTag(ctx, r, PARTS[o.id as PartId], s, hot, t, tilt * 0.05);
+      const price = this.priceOf(o);
+      const can = this.run.pennies >= price;
+      coin(ctx, r.x + r.w / 2 - 14 * s, r.y + r.h + 26 * s, 12 * s);
+      text(ctx, `${price}`, r.x + r.w / 2 + 2 * s, r.y + r.h + 27 * s, 24 * s, can ? C.mustard : C.fireRed, 'left', 5 * s);
+      if (!this.input.touchUI) text(ctx, `${i + 1}`, r.x + 8 * s, r.y - 10 * s, 16 * s, C.paper, 'left', 4 * s);
+      this.hits.push({ r, id: `offer:${i}` });
+      if (hot) {
+        const d = isStamp ? STAMPS[o.id as StampId] : PARTS[o.id as PartId];
+        sel = { title: d.name, body: d.text, price, i };
+      }
+    });
+    // owned stamps album
+    const ay = H * 0.74 + 26 * s;
+    text(ctx, `YOUR STAMPS ${this.run.stamps.length}/${MAX_STAMPS}`, 30 * s, ay, 18 * s, C.cream, 'left', 4 * s);
+    for (let i = 0; i < MAX_STAMPS; i++) {
+      const r = { x: 30 * s + i * 76 * s, y: ay + 18 * s, w: 64 * s, h: 76 * s };
+      const id = this.run.stamps[i];
+      if (!id) {
+        rr(ctx, r.x, r.y, r.w, r.h, 6 * s);
+        ctx.setLineDash([6 * s, 5 * s]);
+        ctx.lineWidth = 2 * s;
+        ctx.strokeStyle = 'rgba(255,241,207,0.4)';
+        ctx.stroke();
+        ctx.setLineDash([]);
+        continue;
+      }
+      const hot = inside(r, this.input.mouse.x, this.input.mouse.y) || (this.selected?.kind === 'own' && this.selected.i === i);
+      drawStamp(ctx, r, STAMPS[id], s * 0.55, hot, t, (i % 2 ? 0.04 : -0.04));
+      this.hits.push({ r, id: `own:${i}` });
+      if (hot) sel = { title: STAMPS[id].name, body: STAMPS[id].text, price: Math.floor(STAMPS[id].price / 2), i, owned: true };
+    }
+    // cart parts fitted
+    const px0 = 30 * s + MAX_STAMPS * 76 * s + 30 * s;
+    text(ctx, 'YOUR CART', px0, ay, 18 * s, C.cream, 'left', 4 * s);
+    const fitted = this.run.parts.map((p) => PARTS[p].name);
+    if (this.run.glassesMax > 3) fitted.push(`${this.run.glassesMax} lamp glasses`);
+    text(ctx, fitted.length ? fitted.join(' · ') : 'Stock matchbox cart', px0, ay + 30 * s, 17 * s, C.paper, 'left', 0, BODY, 600);
+
+    // detail card for the hovered/selected thing
+    const selRef = this.selected;
+    if (!sel && selRef) {
+      if (selRef.kind === 'offer' && this.offers[selRef.i] && !this.offers[selRef.i].sold) {
+        const o = this.offers[selRef.i];
+        const d = o.kind === 'stamp' ? STAMPS[o.id as StampId] : PARTS[o.id as PartId];
+        sel = { title: d.name, body: d.text, price: this.priceOf(o), i: selRef.i };
+      } else if (selRef.kind === 'own' && this.run.stamps[selRef.i]) {
+        const d = STAMPS[this.run.stamps[selRef.i]];
+        sel = { title: d.name, body: d.text, price: Math.floor(d.price / 2), i: selRef.i, owned: true };
       }
     }
-    if (this.result && this.result.kind !== 'delivered') {
-      const r = this.result;
-      if (r.kind === 'failed' || r.kind === 'rest') {
-        const at = r.at ?? (this.sim ? { x: this.sim.chassisPose().x, y: this.sim.chassisPose().y } : null);
-        if (at) {
-          const x = clamp(cam.sx(at.x), 80, L.W - 560);
-          const y = clamp(cam.sy(at.y) - 120, 190, L.H - 200);
-          paperNote(ctx, r.text, x, y, { leader: [cam.sx(at.x), cam.sy(at.y) - 6], size: TYPE.hint, seed: 17, maxW: 300 });
-        }
+    const dy = y + shh + 58 * s;
+    const dw = Math.min(560 * s, W - 60 * s);
+    const dr = { x: W / 2 - dw / 2, y: dy, w: dw, h: 108 * s };
+    if (sel) {
+      const S = sel as { title: string; body: string; price: number; i: number; owned?: boolean };
+      panel(ctx, dr, C.paper, s, 0.005);
+      text(ctx, S.title.toUpperCase(), dr.x + 18 * s, dr.y + 22 * s, 24 * s, C.red);
+      wrapText(ctx, S.body, dr.x + 18 * s, dr.y + 40 * s, dw - 210 * s, 18 * s, C.ink);
+      const br = { x: dr.x + dw - 170 * s, y: dr.y + 30 * s, w: 150 * s, h: 50 * s };
+      if (S.owned) {
+        button(ctx, br, `SELL +${S.price}`, s, inside(br, this.input.mouse.x, this.input.mouse.y), C.blue);
+        this.hits.push({ r: br, id: `sell:${S.i}` });
+      } else {
+        const o = this.offers[S.i];
+        const full = o.kind === 'stamp' && this.run.stamps.length >= MAX_STAMPS;
+        const can = this.run.pennies >= S.price && !full;
+        button(ctx, br, full ? 'ALBUM FULL' : `BUY ${S.price}`, s, inside(br, this.input.mouse.x, this.input.mouse.y), C.green, can);
+        this.hits.push({ r: br, id: `buy:${S.i}` });
       }
+    } else {
+      text(ctx, this.input.touchUI ? 'Tap a stamp or part to read it, tap again to buy.' : 'Click a stamp or part to read it, click again to buy.', W / 2, dr.y + 50 * s, 19 * s, C.paper, 'center', 4 * s, BODY, 600);
     }
-    void focused;
-    void wrapText;
-    void FONT_STAMP;
-    void printed;
-    void roughRect;
+    // reroll & next
+    const rr2 = { x: W - 470 * s, y: H - 84 * s, w: 200 * s, h: 56 * s };
+    const can = this.run.pennies >= this.rerollCost();
+    button(ctx, rr2, `REROLL ${this.rerollCost()}`, s, inside(rr2, this.input.mouse.x, this.input.mouse.y), C.blue, can, this.input.touchUI ? '' : 'R');
+    this.hits.push({ r: rr2, id: 'reroll' });
+    const nr = { x: W - 250 * s, y: H - 84 * s, w: 220 * s, h: 56 * s };
+    button(ctx, nr, 'NEXT SHIFT', s, inside(nr, this.input.mouse.x, this.input.mouse.y), C.red, true, this.input.touchUI ? '' : '⏎');
+    this.hits.push({ r: nr, id: 'next' });
+  }
+
+  private drawOver(ctx: CanvasRenderingContext2D): void {
+    const s = this.s;
+    const W = this.cam.W;
+    const H = this.cam.H;
+    const sh = this.shift;
+    const k = Math.min(1, this.modeT / 0.4);
+    this.dim(ctx, 0.6 * k);
+    const w = 480 * s;
+    const h = 300 * s;
+    const r = { x: W / 2 - w / 2, y: H / 2 - h / 2 + (1 - k) * 60 * s, w, h };
+    panel(ctx, r, C.cream, s, -0.012);
+    text(ctx, 'THE POST IS LATE', W / 2, r.y + 40 * s, 42 * s, C.red, 'center');
+    const why = sh.glasses <= 0 ? 'Every lamp glass is broken.' : `Shift ${this.run.shift} needed ${fmt(sh.cfg.target)} — you posted ${fmt(sh.posted)}.`;
+    text(ctx, why, W / 2, r.y + 86 * s, 20 * s, C.ink, 'center', 0, BODY, 600);
+    text(ctx, `Night total ${fmt(this.run.total)}  ·  best single post ${fmt(this.run.bestPost)}`, W / 2, r.y + 126 * s, 18 * s, C.inkSoft, 'center', 0, BODY, 600);
+    text(ctx, `Windows lit ${this.run.windows}  ·  best night ${fmt(this.save.best)}`, W / 2, r.y + 154 * s, 18 * s, C.inkSoft, 'center', 0, BODY, 600);
+    const br = { x: W / 2 - 140 * s, y: r.y + h - 90 * s, w: 280 * s, h: 58 * s };
+    button(ctx, br, 'NEW NIGHT', s, inside(br, this.input.mouse.x, this.input.mouse.y), C.red, true, this.input.touchUI ? '' : 'R');
+    this.hits.push({ r: br, id: 'again' });
+  }
+
+  private drawDawn(ctx: CanvasRenderingContext2D): void {
+    const s = this.s;
+    const W = this.cam.W;
+    const H = this.cam.H;
+    const k = Math.min(1, this.modeT / 1.2);
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, `rgba(255,170,120,${0.75 * k})`);
+    g.addColorStop(1, `rgba(255,220,140,${0.85 * k})`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+    logo(ctx, W / 2, H * 0.2, Math.min(90 * s, W / 12), this.t, this.fx.reduced);
+    text(ctx, 'DAWN — EVERY WINDOW LIT', W / 2, H * 0.2 + 80 * s, 34 * s, C.cream, 'center', 7 * s);
+    text(ctx, `Night total ${fmt(this.run.total)}`, W / 2, H * 0.48, 48 * s, C.red, 'center', 8 * s);
+    text(ctx, `Best single post ${fmt(this.run.bestPost)}  ·  windows lit ${this.run.windows}  ·  best night ${fmt(this.save.best)}`, W / 2, H * 0.48 + 50 * s, 19 * s, C.ink, 'center', 0, BODY, 600);
+    const br = { x: W / 2 - 140 * s, y: H * 0.66, w: 280 * s, h: 58 * s };
+    button(ctx, br, 'ANOTHER NIGHT', s, inside(br, this.input.mouse.x, this.input.mouse.y), C.red, true, this.input.touchUI ? '' : '⏎');
+    this.hits.push({ r: br, id: 'again' });
+  }
+
+  private drawPause(ctx: CanvasRenderingContext2D): void {
+    const s = this.s;
+    const W = this.cam.W;
+    const H = this.cam.H;
+    this.hits = [];
+    this.dim(ctx, 0.6);
+    const w = 360 * s;
+    const h = 380 * s;
+    const r = { x: W / 2 - w / 2, y: H / 2 - h / 2, w, h };
+    panel(ctx, r, C.cream, s, 0.01);
+    text(ctx, 'PAUSED', W / 2, r.y + 40 * s, 42 * s, C.red, 'center');
+    const items: [string, string, string][] = [
+      ['resume', 'RESUME', C.green],
+      ['mute', this.save.muted ? 'SOUND: OFF' : 'SOUND: ON', C.blue],
+      ['motion', this.save.reduced ? 'MOTION: REDUCED' : 'MOTION: FULL', C.teal],
+      ['restart', 'NEW NIGHT', C.red],
+    ];
+    items.forEach(([id, label, col], i) => {
+      const br = { x: W / 2 - 130 * s, y: r.y + 84 * s + i * 68 * s, w: 260 * s, h: 52 * s };
+      button(ctx, br, label, s, inside(br, this.input.mouse.x, this.input.mouse.y), col);
+      this.hits.push({ r: br, id });
+    });
   }
 }
