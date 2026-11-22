@@ -1,170 +1,93 @@
-// Keyboard, mouse and multi-touch mapped onto three actions: gas, brake, post.
+// Keyboard state plus pointer events (mouse, pen, touch) handed to the active screen.
 
-export type Zone = 'gas' | 'brake' | 'post';
+export interface PointerInfo {
+  id: number;
+  x: number;
+  y: number;
+  /** 0 primary, 2 secondary (right click). */
+  button: number;
+  touch: boolean;
+}
+
+export interface PointerSink {
+  down(p: PointerInfo): void;
+  move(p: PointerInfo): void;
+  up(p: PointerInfo): void;
+}
 
 export class Input {
-  private keys = new Set<string>();
-  private touches = new Map<number, Zone>();
-  private postQueued = false;
-  private pressedQueue: string[] = [];
-  touchUI = false;
-  /** Screen rects for touch pads, set by the HUD each frame. */
-  pads: Record<Zone, { x: number; y: number; r: number }> = {
-    brake: { x: 0, y: 0, r: 0 },
-    gas: { x: 0, y: 0, r: 0 },
-    post: { x: 0, y: 0, r: 0 },
-  };
-  /** Pointer clicks for UI: consumed by the game each frame. */
-  clicks: { x: number; y: number }[] = [];
+  private held = new Set<string>();
+  /** Keys pressed since the last frame (lower-case `KeyboardEvent.key`, ' ' for space). */
+  pressed: string[] = [];
+  /** Modifier state of the last key press. */
+  ctrl = false;
+  shift = false;
   mouse = { x: -1, y: -1 };
-  private mouseGas = false;
-  private mouseBrake = false;
+  touchUI = false;
+  sink: PointerSink | null = null;
   onFirstGesture: (() => void) | null = null;
 
-  constructor(private el: HTMLElement) {
+  constructor(el: HTMLElement) {
     window.addEventListener('keydown', (e) => {
       this.gesture();
-      if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' ', 'Tab'].includes(e.key)) e.preventDefault();
-      const k = norm(e.key);
-      if (!e.repeat) {
-        this.pressedQueue.push(k);
-        if (k === 'post') this.postQueued = true;
-      }
-      this.keys.add(k);
+      if ([' ', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Tab'].includes(e.key)) e.preventDefault();
+      if ((e.ctrlKey || e.metaKey) && ['z', 'y', 'Z', 'Y'].includes(e.key)) e.preventDefault();
+      const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      this.ctrl = e.ctrlKey || e.metaKey;
+      this.shift = e.shiftKey;
+      if (!e.repeat) this.pressed.push(k);
+      this.held.add(k);
     });
-    window.addEventListener('keyup', (e) => this.keys.delete(norm(e.key)));
-    window.addEventListener('blur', () => this.clear());
+    window.addEventListener('keyup', (e) => this.held.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key));
+    window.addEventListener('blur', () => this.held.clear());
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden) this.clear();
+      if (document.hidden) this.held.clear();
     });
     el.addEventListener('contextmenu', (e) => e.preventDefault());
+    const info = (e: PointerEvent): PointerInfo => {
+      const r = el.getBoundingClientRect();
+      return { id: e.pointerId, x: e.clientX - r.left, y: e.clientY - r.top, button: e.button, touch: e.pointerType === 'touch' };
+    };
     el.addEventListener('pointerdown', (e) => {
       this.gesture();
-      const r = el.getBoundingClientRect();
-      const x = e.clientX - r.left;
-      const y = e.clientY - r.top;
-      if (e.pointerType === 'touch') {
-        this.touchUI = true;
-        const z = this.zoneAt(x, y);
-        if (z) {
-          this.touches.set(e.pointerId, z);
-          if (z === 'post') this.postQueued = true;
-          this.pressedQueue.push(z);
-        } else this.clicks.push({ x, y });
+      if (e.pointerType === 'touch') this.touchUI = true;
+      else if (e.pointerType === 'mouse') this.touchUI = false;
+      try {
         el.setPointerCapture?.(e.pointerId);
-      } else {
-        this.clicks.push({ x, y });
-        if (e.button === 0) this.mouseGas = true;
-        if (e.button === 2) this.mouseBrake = true;
+      } catch {
+        // not a live pointer (synthetic event); events still arrive without capture
       }
-    });
-    const up = (e: PointerEvent) => {
-      if (e.pointerType === 'touch') this.touches.delete(e.pointerId);
-      else {
-        if (e.button === 0) this.mouseGas = false;
-        if (e.button === 2) this.mouseBrake = false;
-      }
-    };
-    el.addEventListener('pointerup', up);
-    el.addEventListener('pointercancel', (e) => {
-      this.touches.delete(e.pointerId);
-      this.mouseGas = this.mouseBrake = false;
+      const p = info(e);
+      this.mouse = { x: p.x, y: p.y };
+      this.sink?.down(p);
     });
     el.addEventListener('pointermove', (e) => {
-      const r = el.getBoundingClientRect();
-      this.mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
-      if (e.pointerType === 'touch' && this.touches.has(e.pointerId)) {
-        const z = this.zoneAt(this.mouse.x, this.mouse.y);
-        if (z && z !== 'post') this.touches.set(e.pointerId, z);
-      }
+      const p = info(e);
+      if (e.pointerType !== 'touch') this.mouse = { x: p.x, y: p.y };
+      this.sink?.move(p);
     });
+    const up = (e: PointerEvent) => {
+      const p = info(e);
+      this.sink?.up(p);
+      if (e.pointerType === 'touch') this.mouse = { x: -1, y: -1 };
+    };
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  }
+
+  isHeld(k: string): boolean {
+    return this.held.has(k);
+  }
+
+  endFrame(): void {
+    this.pressed.length = 0;
   }
 
   private gesture(): void {
     if (this.onFirstGesture) {
       const f = this.onFirstGesture;
+      this.onFirstGesture = null;
       f();
     }
-  }
-
-  private zoneAt(x: number, y: number): Zone | null {
-    if (!this.touchUI) return null;
-    for (const z of ['post', 'brake', 'gas'] as Zone[]) {
-      const p = this.pads[z];
-      if (p.r > 0 && Math.hypot(x - p.x, y - p.y) < p.r * 1.35) return z;
-    }
-    // Fallback halves of the screen for driving
-    const w = this.el.clientWidth;
-    const h = this.el.clientHeight;
-    if (y > h * 0.35) return x < w * 0.5 ? 'brake' : 'gas';
-    return null;
-  }
-
-  clear(): void {
-    this.keys.clear();
-    this.touches.clear();
-    this.mouseGas = this.mouseBrake = false;
-    this.postQueued = false;
-  }
-
-  /** Mouse buttons only drive while `allowMouseDrive` (not over menus). */
-  gas(allowMouse = true): boolean {
-    return this.keys.has('gas') || [...this.touches.values()].includes('gas') || (allowMouse && this.mouseGas);
-  }
-  brake(allowMouse = true): boolean {
-    return this.keys.has('brake') || [...this.touches.values()].includes('brake') || (allowMouse && this.mouseBrake);
-  }
-  takePost(): boolean {
-    const p = this.postQueued;
-    this.postQueued = false;
-    return p;
-  }
-  takePressed(): string[] {
-    const q = this.pressedQueue;
-    this.pressedQueue = [];
-    return q;
-  }
-  takeClicks(): { x: number; y: number }[] {
-    const c = this.clicks;
-    this.clicks = [];
-    return c;
-  }
-  isTouchHeld(z: Zone): boolean {
-    return [...this.touches.values()].includes(z) || (z === 'gas' && this.keys.has('gas')) || (z === 'brake' && this.keys.has('brake'));
-  }
-}
-
-function norm(key: string): string {
-  switch (key) {
-    case 'ArrowRight':
-    case 'd':
-    case 'D':
-    case 'ArrowUp':
-    case 'w':
-    case 'W':
-      return 'gas';
-    case 'ArrowLeft':
-    case 'a':
-    case 'A':
-      return 'brake';
-    case ' ':
-    case 'ArrowDown':
-    case 's':
-    case 'S':
-      return 'post';
-    case 'Escape':
-    case 'p':
-    case 'P':
-      return 'pause';
-    case 'Enter':
-      return 'enter';
-    case 'r':
-    case 'R':
-      return 'r';
-    case 'm':
-    case 'M':
-      return 'm';
-    default:
-      return key.length === 1 ? key.toLowerCase() : key;
   }
 }

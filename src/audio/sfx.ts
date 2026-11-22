@@ -8,14 +8,11 @@ export class Sfx {
   private sfx!: GainNode;
   private music!: GainNode;
   private noise!: AudioBuffer;
-  private engine: { osc: OscillatorNode; osc2: OscillatorNode; gain: GainNode; filter: BiquadFilterNode } | null = null;
   private musicOn = false;
   private nextBeat = 0;
   private beat = 0;
-  private grindNode: { src: AudioBufferSourceNode; gain: GainNode } | null = null;
   /** 0..1: how tense the music is (a fragile flame). */
   intensity = 0;
-  /** Inspection delivery: minor key, quicker. */
   boss = false;
   muted = false;
 
@@ -98,62 +95,95 @@ export class Sfx {
     return 392 * Math.pow(2, semi / 12);
   }
 
-  // ---------------------------------------------------------------- engine
+  // ---------------------------------------------------------------- loops
 
-  engineUpdate(speed: number, throttle: number, running: boolean): void {
+  /** A continuous filtered-noise voice (rocket hiss, lantern roar, clockwork). */
+  private loops = new Map<string, { gain: GainNode; filter: BiquadFilterNode }>();
+  private loop(name: string, on: boolean, vol: number, freq: number, q = 1, type: BiquadFilterType = 'bandpass'): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    if (!this.engine && running) {
-      const osc = ctx.createOscillator();
-      const osc2 = ctx.createOscillator();
-      const gain = ctx.createGain();
+    let l = this.loops.get(name);
+    if (!l && on) {
+      const src = ctx.createBufferSource();
+      src.buffer = this.noise;
+      src.loop = true;
       const filter = ctx.createBiquadFilter();
-      osc.type = 'square';
-      osc2.type = 'sawtooth';
-      filter.type = 'lowpass';
-      filter.frequency.value = 600;
+      filter.type = type;
+      filter.frequency.value = freq;
+      filter.Q.value = q;
+      const gain = ctx.createGain();
       gain.gain.value = 0;
-      osc.connect(filter);
-      osc2.connect(filter);
-      filter.connect(gain).connect(this.sfx);
-      osc.start();
-      osc2.start();
-      this.engine = { osc, osc2, gain, filter };
+      src.connect(filter).connect(gain).connect(this.sfx);
+      src.start();
+      l = { gain, filter };
+      this.loops.set(name, l);
     }
-    if (!this.engine) return;
-    const t = ctx.currentTime;
-    const e = this.engine;
-    const v = running ? Math.abs(speed) : 0;
-    e.osc.frequency.setTargetAtTime(38 + v * 5 + throttle * 12, t, 0.05);
-    e.osc2.frequency.setTargetAtTime(76 + v * 10 + throttle * 20, t, 0.05);
-    e.filter.frequency.setTargetAtTime(350 + v * 60 + Math.max(0, throttle) * 500, t, 0.08);
-    e.gain.gain.setTargetAtTime(running ? 0.025 + Math.max(0, throttle) * 0.035 + Math.min(v, 14) * 0.002 : 0, t, 0.06);
+    if (!l) return;
+    l.gain.gain.setTargetAtTime(on ? vol : 0, ctx.currentTime, on ? 0.02 : 0.06);
+    l.filter.frequency.setTargetAtTime(freq, ctx.currentTime, 0.05);
+  }
+  rocket(on: boolean): void {
+    this.loop('rocket', on, 0.16, 1800, 0.7);
+  }
+  lantern(on: boolean): void {
+    this.loop('lantern', on, 0.09, 380, 0.8, 'lowpass');
+  }
+  private tickT = 0;
+  /** Clockwork ticking while the keys drive. */
+  drive(on: boolean, speed: number): void {
+    const ctx = this.ctx;
+    if (!ctx || !on) return;
+    const gap = Math.max(0.05, 0.14 - speed * 0.012);
+    if (ctx.currentTime - this.tickT > gap) {
+      this.tickT = ctx.currentTime;
+      this.tone(2400 + Math.random() * 300, 0.02, 'square', 0.018);
+    }
+  }
+  stopLoops(): void {
+    for (const k of this.loops.keys()) this.loop(k, false, 0, 1000);
   }
 
   // ---------------------------------------------------------------- effects
 
-  takeoff(): void {
-    this.burst(0.25, 0.08, 800, 0.7, 'bandpass', 0, 2400);
+  /** Pin pushed into cork. */
+  pin(): void {
+    this.tone(1400, 0.04, 'square', 0.05);
+    this.burst(0.05, 0.12, 900, 1.2, 'bandpass');
   }
-  land(power: number): void {
-    const p = Math.min(1, power / 12);
-    this.tone(90, 0.18, 'sine', 0.25 + p * 0.3, 0, 45);
-    this.burst(0.12, 0.1 + p * 0.25, 500, 0.8, 'lowpass');
+  /** Matchstick laid. */
+  stick(): void {
+    this.tone(520, 0.06, 'triangle', 0.12);
+    this.burst(0.04, 0.1, 2400, 1, 'bandpass');
   }
-  trick(sparks: number, big: boolean): void {
-    const s = Math.min(PENTA.length - 3, sparks);
-    this.tone(this.note(PENTA[s]), 0.18, 'triangle', 0.18);
-    this.tone(this.note(PENTA[s + 2]), 0.22, 'triangle', 0.14, 0.06);
-    if (big) this.tone(this.note(PENTA[s + 4] ?? 24), 0.3, 'sine', 0.12, 0.12);
+  unstick(): void {
+    this.tone(300, 0.08, 'triangle', 0.1, 0, 180);
   }
-  letter(n: number): void {
-    this.tone(this.note(12 + (n % 5) * 2), 0.12, 'sine', 0.14);
-    this.tone(this.note(19 + (n % 5) * 2), 0.1, 'sine', 0.08, 0.04);
+  turn(): void {
+    this.tone(880, 0.05, 'triangle', 0.08);
+    this.tone(1175, 0.05, 'triangle', 0.06, 0.04);
   }
-  spark(i: number): void {
-    const s = PENTA[Math.min(PENTA.length - 1, i)];
-    this.tone(this.note(s + 7), 0.09, 'square', 0.05);
-    this.tone(this.note(s + 19), 0.12, 'sine', 0.08);
+  go(): void {
+    this.tone(this.note(0), 0.12, 'triangle', 0.14);
+    this.tone(this.note(7), 0.14, 'triangle', 0.14, 0.07);
+    this.burst(0.2, 0.08, 1200, 0.8, 'bandpass', 0.05, 3000);
+  }
+  /** Glass knocked: brighter for harder knocks. */
+  knock(loss: number): void {
+    const k = Math.min(1, loss * 6);
+    this.tone(1800 + k * 1400, 0.12 + k * 0.1, 'sine', 0.06 + k * 0.12);
+    this.tone(2700 + k * 900, 0.08, 'sine', 0.04 + k * 0.06, 0.01);
+    this.burst(0.06, 0.05 + k * 0.15, 500, 0.8, 'lowpass');
+  }
+  boing(hit: boolean): void {
+    if (!hit) {
+      this.tone(500, 0.06, 'square', 0.04);
+      return;
+    }
+    this.tone(180, 0.28, 'triangle', 0.2, 0, 620);
+    this.tone(90, 0.12, 'sine', 0.2, 0, 50);
+  }
+  letter(): void {
+    [12, 16, 19, 24].forEach((s, i) => this.tone(this.note(s), 0.14, 'triangle', 0.12, i * 0.05));
   }
   bell(): void {
     for (const [f, v, d] of [
@@ -163,29 +193,22 @@ export class Sfx {
     ] as const)
       this.tone(f, d, 'sine', v);
   }
-  stamp(): void {
+  stamp(i = 0): void {
     this.tone(70, 0.12, 'sine', 0.4, 0, 40);
     this.burst(0.08, 0.25, 300, 1, 'lowpass');
-  }
-  whoosh(): void {
-    this.burst(0.35, 0.12, 400, 0.9, 'bandpass', 0, 2000);
+    this.tone(this.note(PENTA[Math.min(PENTA.length - 1, i * 2 + 2)]), 0.2, 'triangle', 0.14, 0.03);
   }
   blowout(): void {
     this.burst(0.5, 0.25, 1400, 0.6, 'bandpass', 0, 200);
     this.tone(400, 0.4, 'sine', 0.1, 0, 120);
   }
-  crash(): void {
-    this.burst(0.5, 0.35, 3000, 0.5, 'highpass');
-    for (let i = 0; i < 5; i++) this.tone(2000 + Math.random() * 2500, 0.15, 'sine', 0.06, 0.02 + i * 0.03);
-    this.tone(120, 0.3, 'sine', 0.3, 0, 50);
+  ignite(): void {
+    this.burst(0.18, 0.18, 700, 0.8, 'bandpass', 0, 2600);
+    this.tone(220, 0.1, 'sawtooth', 0.04, 0, 440);
   }
-  emptyPost(): void {
-    this.tone(180, 0.12, 'square', 0.06);
-    this.tone(140, 0.15, 'square', 0.06, 0.08);
-  }
-  coin(i = 0): void {
-    this.tone(1318 + i * 80, 0.08, 'square', 0.05);
-    this.tone(1975 + i * 80, 0.18, 'sine', 0.1, 0.05);
+  splash(): void {
+    this.burst(0.6, 0.3, 700, 0.6, 'lowpass', 0, 200);
+    this.tone(220, 0.3, 'sine', 0.12, 0, 90);
   }
   click(): void {
     this.tone(600, 0.05, 'square', 0.05);
@@ -196,81 +219,6 @@ export class Sfx {
   fanfare(win: boolean): void {
     const seq = win ? [0, 4, 7, 12, 16] : [7, 4, 0, -5];
     seq.forEach((s, i) => this.tone(this.note(s), 0.3, 'triangle', 0.16, i * 0.12));
-  }
-
-  // ---------------------------------------------------------------- course features
-
-  strike(): void {
-    this.burst(0.18, 0.3, 2500, 0.8, 'bandpass', 0, 6000);
-    this.burst(0.5, 0.18, 300, 0.6, 'bandpass', 0.05, 1800);
-    this.tone(220, 0.35, 'sawtooth', 0.05, 0.05, 660);
-  }
-  snap(): void {
-    this.burst(0.05, 0.5, 3500, 1.5, 'highpass');
-    this.tone(160, 0.1, 'square', 0.2, 0, 60);
-    this.tone(this.note(12), 0.4, 'triangle', 0.1, 0.06, this.note(24));
-  }
-  hoop(): void {
-    this.burst(0.4, 0.3, 600, 0.6, 'lowpass', 0, 2200);
-    this.tone(this.note(7), 0.2, 'triangle', 0.14);
-    this.tone(this.note(14), 0.25, 'triangle', 0.12, 0.07);
-  }
-  puncture(): void {
-    this.tone(1200, 0.06, 'square', 0.08);
-    this.burst(0.6, 0.18, 5000, 0.8, 'highpass', 0.03, 2500);
-  }
-  smash(n: number): void {
-    this.burst(0.09, 0.22, 1800 + (n % 5) * 300, 1.2, 'bandpass');
-    this.tone(260 + (n % 7) * 40, 0.06, 'square', 0.04);
-  }
-  /** Continuous pencil scrape while grinding. */
-  grind(on: boolean, speed = 10): void {
-    const ctx = this.ctx;
-    if (!ctx) return;
-    if (on && !this.grindNode) {
-      const src = ctx.createBufferSource();
-      src.buffer = this.noise;
-      src.loop = true;
-      const f = ctx.createBiquadFilter();
-      f.type = 'bandpass';
-      f.frequency.value = 1400;
-      f.Q.value = 2;
-      const gain = ctx.createGain();
-      gain.gain.value = 0;
-      src.connect(f).connect(gain).connect(this.sfx);
-      src.start();
-      this.grindNode = { src, gain };
-    }
-    if (!this.grindNode) return;
-    this.grindNode.gain.gain.setTargetAtTime(on ? 0.05 + Math.min(speed, 16) * 0.004 : 0, ctx.currentTime, 0.03);
-  }
-  paw(): void {
-    this.tone(70, 0.35, 'sine', 0.5, 0, 35);
-    this.burst(0.25, 0.3, 400, 0.7, 'lowpass');
-  }
-  meow(): void {
-    this.tone(700, 0.35, 'sawtooth', 0.04, 0, 520);
-  }
-  saved(): void {
-    [0, 7, 12].forEach((s, i) => this.tone(this.note(s + 12), 0.25, 'sine', 0.1, i * 0.05));
-  }
-  /** A stamp firing in the tally: each one a step higher. */
-  stampFire(i: number): void {
-    const s = PENTA[Math.min(PENTA.length - 1, i + 2)];
-    this.tone(90, 0.1, 'sine', 0.35, 0, 45);
-    this.burst(0.06, 0.2, 400, 1, 'lowpass');
-    this.tone(this.note(s), 0.16, 'triangle', 0.16, 0.02);
-    this.tone(this.note(s + 12), 0.12, 'sine', 0.06, 0.04);
-  }
-  total(big: boolean): void {
-    this.tone(this.note(0), 0.25, 'square', 0.06);
-    this.tone(this.note(7), 0.3, 'triangle', 0.14, 0.04);
-    this.tone(this.note(12), 0.45, 'triangle', 0.14, 0.08);
-    if (big) this.tone(this.note(19), 0.6, 'sine', 0.12, 0.12);
-  }
-  scorcher(): void {
-    this.burst(1.0, 0.3, 300, 0.5, 'lowpass', 0, 1200);
-    [0, 4, 7, 12, 16, 19, 24].forEach((s, i) => this.tone(this.note(s), 0.35, 'triangle', 0.12, i * 0.05));
   }
 
   // ---------------------------------------------------------------- music: a plucky night loop

@@ -1,6 +1,6 @@
-// Particles, floating trick labels and screen shake. World-space positions.
+// Particles, floating labels and screen shake. World-space positions.
 import { C, FONT } from '../render/palette';
-import { toScreen, type Cam } from '../render/world';
+import { toScreen, type Cam } from '../render/view';
 
 type Ctx = CanvasRenderingContext2D;
 

@@ -1,12 +1,16 @@
-// Character and prop drawings. World drawings use metres with y pointing up
-// (the caller flips the canvas); every shape gets a bold ink keyline.
-import { C, BOOK_TONES } from './palette';
-import type { PartId } from '../sim/rules';
+// Cut-paper drawings of the parts. Everything is drawn in world metres with
+// y pointing up (the caller sets the transform), with a bold ink keyline.
+// The same function draws a part in the tray, in the hand and mounted, so a
+// part always has the same silhouette.
+import { C } from './palette';
+import { LAMP_H, LAMP_W, STICK_THICK, WHEEL_R, type PartKind } from '../sim/parts';
 
 type Ctx = CanvasRenderingContext2D;
 
+export const LW = 0.035;
+
 export function rr(ctx: Ctx, x: number, y: number, w: number, h: number, r: number): void {
-  const k = Math.min(r, w / 2, h / 2);
+  const k = Math.max(0, Math.min(r, w / 2, h / 2));
   ctx.beginPath();
   ctx.moveTo(x + k, y);
   ctx.lineTo(x + w - k, y);
@@ -20,11 +24,12 @@ export function rr(ctx: Ctx, x: number, y: number, w: number, h: number, r: numb
   ctx.closePath();
 }
 
-export function inked(ctx: Ctx, fill: string, lw: number): void {
+export function inked(ctx: Ctx, fill: string, lw = LW): void {
   ctx.fillStyle = fill;
   ctx.fill();
   ctx.lineWidth = lw;
   ctx.strokeStyle = C.ink;
+  ctx.lineJoin = 'round';
   ctx.stroke();
 }
 
@@ -33,19 +38,17 @@ function circle(ctx: Ctx, x: number, y: number, r: number): void {
   ctx.arc(x, y, r, 0, Math.PI * 2);
 }
 
-// ---------------------------------------------------------------- flame
-
 /** Teardrop flame standing on (x,y). size 0..1. */
-export function drawFlame(ctx: Ctx, x: number, y: number, size: number, t: number, lean = 0, dead = false): void {
-  if (dead) {
-    circle(ctx, x, y + 0.05, 0.05);
-    ctx.fillStyle = C.fireOrange;
+export function drawFlame(ctx: Ctx, x: number, y: number, size: number, t: number, lean = 0): void {
+  if (size <= 0) {
+    circle(ctx, x, y + 0.02, 0.025);
+    ctx.fillStyle = C.fireRed;
     ctx.fill();
     return;
   }
-  const h = 0.26 + size * 0.95;
-  const w = 0.13 + size * 0.2;
-  const fl = Math.sin(t * 17) * 0.04 + Math.sin(t * 29 + 1) * 0.03;
+  const h = 0.08 + size * 0.17;
+  const w = 0.035 + size * 0.03;
+  const fl = Math.sin(t * 17) * 0.05 + Math.sin(t * 29 + 1) * 0.04;
   const layers: [string, number][] = [
     [C.fireRed, 1],
     [C.fireOrange, 0.78],
@@ -55,7 +58,7 @@ export function drawFlame(ctx: Ctx, x: number, y: number, size: number, t: numbe
   for (const [col, k] of layers) {
     const hh = h * k * (1 + fl);
     const ww = w * k;
-    const tipX = x + (lean * 0.25 + fl * 1.5) * hh;
+    const tipX = x + (lean * 0.4 + fl * 1.2) * hh;
     ctx.beginPath();
     ctx.moveTo(x, y);
     ctx.bezierCurveTo(x - ww * 1.3, y + hh * 0.05, x - ww * 0.9, y + hh * 0.6, tipX, y + hh);
@@ -65,519 +68,297 @@ export function drawFlame(ctx: Ctx, x: number, y: number, size: number, t: numbe
   }
 }
 
-// ---------------------------------------------------------------- cart
+// ---------------------------------------------------------------- matchstick & pins
 
-export interface CartLook {
-  t: number;
-  flame: number;
-  dead: boolean;
-  lean: number;
-  sparks: number;
-  wheels: PartId | null;
-  parts: ReadonlySet<PartId>;
-  airborne: boolean;
-  /** -1..1: moth expression, negative = scared. */
-  mood: number;
-  blink: boolean;
-  cracked: number;
-}
-
-/** Chassis, lamp and moth in chassis-local metres (origin = chassis centre). */
-export function drawCartBody(ctx: Ctx, L: CartLook): void {
-  const lw = 0.055;
-  // tail feather vane
-  if (L.parts.has('feather')) {
-    ctx.save();
-    ctx.translate(-0.98, 0.1);
-    ctx.rotate(0.5 + Math.sin(L.t * 6) * 0.08);
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.bezierCurveTo(-0.15, 0.25, -0.1, 0.6, 0.05, 0.75);
-    ctx.bezierCurveTo(0.2, 0.55, 0.15, 0.2, 0, 0);
-    inked(ctx, C.pink, lw * 0.8);
-    ctx.beginPath();
-    ctx.moveTo(0.02, 0.05);
-    ctx.lineTo(0.05, 0.7);
-    ctx.stroke();
-    ctx.restore();
-  }
-  // second winding key
-  const drawKey = (kx: number, ky: number, a: number) => {
-    ctx.save();
-    ctx.translate(kx, ky);
-    ctx.rotate(a);
-    ctx.fillStyle = C.mustard;
-    ctx.beginPath();
-    ctx.rect(-0.03, 0, 0.06, 0.16);
-    inked(ctx, C.mustard, lw * 0.7);
-    ctx.beginPath();
-    ctx.ellipse(-0.11, 0.22, 0.1, 0.07, 0, 0, Math.PI * 2);
-    inked(ctx, C.red, lw * 0.7);
-    ctx.beginPath();
-    ctx.ellipse(0.11, 0.22, 0.1, 0.07, 0, 0, Math.PI * 2);
-    inked(ctx, C.red, lw * 0.7);
-    ctx.restore();
-  };
-  const keyA = Math.sin(L.t * 9) * 0.6;
-  drawKey(-0.78, 0.16, -0.25 + keyA * 0.1);
-  if (L.parts.has('twinKey')) drawKey(0.82, 0.16, 0.25 - keyA * 0.1);
-
-  // matchbox sleeve
-  rr(ctx, -1.0, -0.21, 2.0, 0.44, 0.06);
-  inked(ctx, C.red, lw);
-  // drawer tray sticking out the back
-  rr(ctx, -1.08, -0.16, 0.14, 0.34, 0.03);
-  inked(ctx, C.paperShade, lw * 0.8);
-  // label
-  rr(ctx, -0.52, -0.13, 1.04, 0.28, 0.04);
-  inked(ctx, C.cream, lw * 0.7);
-  ctx.fillStyle = C.blue;
-  ctx.fillRect(-0.48, -0.03, 0.96, 0.07);
-  ctx.fillStyle = C.red;
-  ctx.beginPath();
-  ctx.arc(0, 0.005, 0.085, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = C.mustard;
-  ctx.beginPath();
-  ctx.arc(0, 0.005, 0.04, 0, Math.PI * 2);
-  ctx.fill();
-  // striker strip
-  ctx.fillStyle = C.redDark;
-  ctx.fillRect(-0.95, -0.2, 1.9, 0.05);
-
-  // lamp rail
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(-0.25, 0.27);
-  ctx.lineTo(0.55, 0.27);
-  ctx.lineWidth = 0.07;
-  ctx.strokeStyle = C.ink;
-  ctx.stroke();
-  ctx.lineWidth = 0.035;
-  ctx.strokeStyle = C.mustard;
-  ctx.stroke();
-
-  drawMoth(ctx, L);
-  drawLamp(ctx, 0.12 + L.lean * 0.16, 0.3, L);
-}
-
-function drawLamp(ctx: Ctx, x: number, y: number, L: CartLook): void {
-  const lw = 0.05;
-  // glow
-  if (!L.dead) {
-    const r = 0.9 + L.flame * 1.6;
-    const g = ctx.createRadialGradient(x, y + 0.4, 0.05, x, y + 0.4, r);
-    g.addColorStop(0, 'rgba(255,214,90,0.55)');
-    g.addColorStop(1, 'rgba(255,214,90,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(x - r, y + 0.4 - r, r * 2, r * 2);
-  }
-  // base
-  rr(ctx, x - 0.2, y - 0.02, 0.4, 0.12, 0.03);
-  inked(ctx, C.mustard, lw);
-  // chimney glass
-  const gx = x;
-  const gy = y + 0.1;
-  ctx.beginPath();
-  ctx.moveTo(gx - 0.15, gy);
-  ctx.bezierCurveTo(gx - 0.3, gy + 0.18, gx - 0.24, gy + 0.42, gx - 0.11, gy + 0.6);
-  ctx.lineTo(gx + 0.11, gy + 0.6);
-  ctx.bezierCurveTo(gx + 0.24, gy + 0.42, gx + 0.3, gy + 0.18, gx + 0.15, gy);
-  ctx.closePath();
-  ctx.fillStyle = 'rgba(190,235,255,0.25)';
-  ctx.fill();
+export function drawStick(ctx: Ctx, ax: number, ay: number, bx: number, by: number, opts: { ghost?: boolean; bad?: boolean; hot?: boolean } = {}): void {
+  const len = Math.hypot(bx - ax, by - ay);
+  if (len < 1e-3) return;
   ctx.save();
-  ctx.clip();
-  drawFlame(ctx, gx, gy + 0.04, L.flame, L.t, -L.lean, L.dead);
-  ctx.restore();
-  // flame pokes out of a roaring lamp
-  if (L.flame > 0.55 && !L.dead) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(gx - 0.6, gy + 0.6, 1.2, 1.5);
-    ctx.clip();
-    drawFlame(ctx, gx, gy + 0.04, L.flame, L.t, -L.lean);
-    ctx.restore();
-  }
+  ctx.translate(ax, ay);
+  ctx.rotate(Math.atan2(by - ay, bx - ax));
+  if (opts.ghost) ctx.globalAlpha = 0.7;
+  const t = STICK_THICK;
+  rr(ctx, -t / 2, -t / 2, len + t, t, t * 0.3);
+  inked(ctx, opts.bad ? '#ff9b8a' : opts.hot ? '#fff6d8' : '#f2d7a0', LW * 0.8);
+  // grain
   ctx.beginPath();
-  ctx.moveTo(gx - 0.15, gy);
-  ctx.bezierCurveTo(gx - 0.3, gy + 0.18, gx - 0.24, gy + 0.42, gx - 0.11, gy + 0.6);
-  ctx.lineTo(gx + 0.11, gy + 0.6);
-  ctx.bezierCurveTo(gx + 0.24, gy + 0.42, gx + 0.3, gy + 0.18, gx + 0.15, gy);
+  ctx.moveTo(t * 0.4, -t * 0.12);
+  ctx.lineTo(len * 0.7, -t * 0.12);
+  ctx.lineWidth = 0.008;
+  ctx.strokeStyle = 'rgba(160,100,40,0.5)';
+  ctx.stroke();
+  // red match head at the far end
+  ctx.beginPath();
+  ctx.ellipse(len - t * 0.1, 0, t * 1.05, t * 0.78, 0, 0, Math.PI * 2);
+  inked(ctx, opts.bad ? C.redDark : C.red, LW * 0.8);
+  ctx.restore();
+}
+
+export function drawPin(ctx: Ctx, x: number, y: number, r = 0.045, hot = false): void {
+  circle(ctx, x, y, r * (hot ? 1.5 : 1));
+  inked(ctx, hot ? C.fire : '#e2b04a', LW * 0.6);
+  circle(ctx, x - r * 0.3, y + r * 0.3, r * 0.35);
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fill();
+}
+
+// ---------------------------------------------------------------- parts
+
+/** The lamp: brass foot, glass chimney, flame inside. (x,y) is its pin. */
+export function drawLamp(ctx: Ctx, flame: number, t: number, lean = 0): void {
+  const w = LAMP_W;
+  const h = LAMP_H;
+  const y0 = -h / 2;
+  // foot
+  rr(ctx, -w / 2, y0, w, 0.09, 0.03);
+  inked(ctx, '#e2b04a');
+  // oil reservoir shows the flame left
+  rr(ctx, -w * 0.38, y0 + 0.08, w * 0.76, 0.09, 0.03);
+  inked(ctx, '#c97f2c');
+  ctx.save();
+  rr(ctx, -w * 0.38, y0 + 0.08, w * 0.76 * Math.max(0, Math.min(1, flame)), 0.09, 0.03);
+  ctx.fillStyle = C.mustard;
+  ctx.fill();
+  ctx.restore();
+  // chimney
+  ctx.beginPath();
+  ctx.moveTo(-w * 0.3, y0 + 0.17);
+  ctx.bezierCurveTo(-w * 0.62, y0 + 0.27, -w * 0.3, y0 + 0.38, -w * 0.18, h / 2 + 0.03);
+  ctx.lineTo(w * 0.18, h / 2 + 0.03);
+  ctx.bezierCurveTo(w * 0.3, y0 + 0.38, w * 0.62, y0 + 0.27, w * 0.3, y0 + 0.17);
   ctx.closePath();
-  ctx.lineWidth = lw;
+  ctx.fillStyle = flame > 0 ? 'rgba(255,236,170,0.55)' : 'rgba(190,210,235,0.35)';
+  ctx.fill();
+  drawFlame(ctx, 0, y0 + 0.17, flame, t, lean);
+  ctx.lineWidth = LW;
   ctx.strokeStyle = C.ink;
   ctx.stroke();
   // glint
   ctx.beginPath();
-  ctx.moveTo(gx - 0.13, gy + 0.12);
-  ctx.quadraticCurveTo(gx - 0.19, gy + 0.3, gx - 0.11, gy + 0.46);
-  ctx.lineWidth = 0.03;
-  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  ctx.moveTo(-w * 0.28, y0 + 0.24);
+  ctx.quadraticCurveTo(-w * 0.36, y0 + 0.3, -w * 0.2, y0 + 0.38);
+  ctx.lineWidth = 0.014;
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
   ctx.stroke();
-  // stress cracks on a big flame
-  if (L.cracked > 0) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-    ctx.lineWidth = 0.022;
-    ctx.beginPath();
-    ctx.moveTo(gx + 0.14, gy + 0.08);
-    ctx.lineTo(gx + 0.07, gy + 0.2);
-    ctx.lineTo(gx + 0.13, gy + 0.27);
-    if (L.cracked > 1) {
-      ctx.moveTo(gx - 0.18, gy + 0.3);
-      ctx.lineTo(gx - 0.1, gy + 0.38);
-      ctx.lineTo(gx - 0.15, gy + 0.46);
-    }
-    ctx.stroke();
-  }
-  // cap
-  rr(ctx, gx - 0.15, gy + 0.58, 0.3, 0.09, 0.03);
-  inked(ctx, C.mustard, lw);
+  // handle
   ctx.beginPath();
-  ctx.moveTo(gx - 0.08, gy + 0.67);
-  ctx.quadraticCurveTo(gx, gy + 0.82, gx + 0.08, gy + 0.67);
-  ctx.lineWidth = 0.035;
+  ctx.arc(0, h / 2 + 0.06, 0.05, 0, Math.PI);
+  ctx.lineWidth = LW * 0.8;
   ctx.strokeStyle = C.ink;
   ctx.stroke();
 }
 
-export function drawMoth(ctx: Ctx, L: CartLook): void {
+/** A shirt button wheel (or the clockwork key wheel). Drawn centred, rotated by `spin`. */
+export function drawWheel(ctx: Ctx, key: boolean, spin: number, wind = 0): void {
+  const r = WHEEL_R;
   ctx.save();
-  ctx.translate(-0.5, 0.22);
-  ctx.scale(1.25, 1.25);
-  ctx.translate(0.5, -0.22);
-  drawMothInner(ctx, L);
-  ctx.restore();
-}
-
-function drawMothInner(ctx: Ctx, L: CartLook): void {
-  const lw = 0.05;
-  const x = -0.5;
-  const y = 0.22;
-  const bob = Math.sin(L.t * 8) * 0.015;
-  // wings: flutter when airborne
-  const flap = L.airborne ? Math.sin(L.t * 40) * 0.5 : 0.1;
-  ctx.save();
-  ctx.translate(x - 0.12, y + 0.36 + bob);
-  for (const side of [-1, 1]) {
-    ctx.save();
-    ctx.rotate(side * 0.15 - 0.4 + flap * side * 0.3);
-    ctx.scale(1, side === 1 ? 1 : 0.8);
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.bezierCurveTo(-0.5, 0.25, -0.55, -0.15, -0.3, -0.25);
-    ctx.bezierCurveTo(-0.15, -0.28, -0.05, -0.12, 0, 0);
-    inked(ctx, side === 1 ? C.paperShade : '#e6c487', lw * 0.8);
-    circle(ctx, -0.28, -0.02, 0.06);
-    inked(ctx, C.teal, lw * 0.5);
-    ctx.restore();
-  }
-  ctx.restore();
-  // body
-  ctx.beginPath();
-  ctx.ellipse(x, y + 0.2 + bob, 0.17, 0.22, 0.1, 0, Math.PI * 2);
-  inked(ctx, C.cream, lw);
-  // fuzzy collar
-  ctx.beginPath();
-  for (let i = 0; i <= 8; i++) {
-    const a = Math.PI * (0.05 + (i / 8) * 0.9);
-    const r = i % 2 ? 0.2 : 0.16;
-    const px = x + Math.cos(a) * r * 1.1;
-    const py = y + 0.36 + bob + Math.sin(a) * r * 0.45 - 0.05;
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  }
-  ctx.closePath();
-  inked(ctx, C.paper, lw * 0.7);
-  // head
-  const hx = x + 0.04;
-  const hy = y + 0.5 + bob;
-  circle(ctx, hx, hy, 0.2);
-  inked(ctx, C.cream, lw);
-  // eyes
-  const eyeR = L.mood < -0.3 ? 0.085 : 0.07;
-  for (const ex of [hx - 0.02, hx + 0.12]) {
-    if (L.blink) {
-      ctx.beginPath();
-      ctx.moveTo(ex - 0.05, hy + 0.02);
-      ctx.lineTo(ex + 0.05, hy + 0.02);
-      ctx.lineWidth = 0.03;
-      ctx.strokeStyle = C.ink;
-      ctx.stroke();
-    } else {
-      circle(ctx, ex, hy + 0.02, eyeR);
-      ctx.fillStyle = C.ink;
-      ctx.fill();
-      circle(ctx, ex + 0.025, hy + 0.05, eyeR * 0.35);
-      ctx.fillStyle = C.white;
-      ctx.fill();
-    }
-  }
-  // mouth
-  ctx.beginPath();
-  if (L.mood > 0.3) ctx.arc(hx + 0.06, hy - 0.08, 0.05, Math.PI * 1.1, Math.PI * 1.9, true);
-  else if (L.mood < -0.3) ctx.ellipse(hx + 0.06, hy - 0.09, 0.03, 0.04, 0, 0, Math.PI * 2);
-  else {
-    ctx.moveTo(hx + 0.02, hy - 0.09);
-    ctx.lineTo(hx + 0.1, hy - 0.09);
-  }
-  ctx.lineWidth = 0.03;
-  ctx.strokeStyle = C.ink;
-  ctx.stroke();
-  // antennae (one bent)
-  ctx.lineWidth = 0.03;
-  ctx.beginPath();
-  ctx.moveTo(hx - 0.04, hy + 0.17);
-  ctx.quadraticCurveTo(hx - 0.2, hy + 0.45, hx - 0.32, hy + 0.42);
-  ctx.moveTo(hx + 0.08, hy + 0.17);
-  ctx.quadraticCurveTo(hx + 0.12, hy + 0.42, hx + 0.24, hy + 0.36);
-  ctx.lineTo(hx + 0.3, hy + 0.26);
-  ctx.stroke();
-  for (const [ax, ay] of [
-    [hx - 0.32, hy + 0.42],
-    [hx + 0.3, hy + 0.26],
-  ]) {
-    ctx.beginPath();
-    ctx.ellipse(ax, ay, 0.06, 0.035, 0.3, 0, Math.PI * 2);
-    inked(ctx, C.mustard, 0.025);
-  }
-  // postman cap
-  ctx.beginPath();
-  ctx.moveTo(hx - 0.17, hy + 0.1);
-  ctx.quadraticCurveTo(hx - 0.15, hy + 0.3, hx + 0.02, hy + 0.3);
-  ctx.quadraticCurveTo(hx + 0.18, hy + 0.3, hx + 0.17, hy + 0.12);
-  ctx.closePath();
-  inked(ctx, C.blueDark, lw * 0.8);
-  ctx.fillStyle = C.red;
-  ctx.fillRect(hx - 0.165, hy + 0.11, 0.335, 0.05);
-  ctx.beginPath();
-  ctx.moveTo(hx + 0.12, hy + 0.12);
-  ctx.quadraticCurveTo(hx + 0.3, hy + 0.1, hx + 0.32, hy + 0.06);
-  ctx.lineWidth = 0.05;
-  ctx.strokeStyle = C.ink;
-  ctx.stroke();
-}
-
-/** A wheel in its own local frame (origin = hub, already rotated). */
-export function drawWheel(ctx: Ctx, r: number, kind: PartId | null): void {
-  const lw = 0.05;
-  if (kind === 'reels') {
-    // cotton reel: wide flanges, thread
-    circle(ctx, 0, 0, r);
-    inked(ctx, '#d8a35c', lw);
-    circle(ctx, 0, 0, r * 0.78);
-    inked(ctx, C.pink, lw * 0.7);
-    ctx.strokeStyle = 'rgba(26,18,51,0.35)';
-    ctx.lineWidth = 0.02;
-    for (let i = 0; i < 5; i++) {
-      circle(ctx, 0, 0, r * (0.42 + i * 0.075));
-      ctx.stroke();
-    }
-    circle(ctx, 0, 0, r * 0.25);
-    inked(ctx, '#d8a35c', lw * 0.7);
-    ctx.beginPath();
-    ctx.moveTo(r * 0.78, 0);
-    ctx.lineTo(r * 1.05, -0.08);
-    ctx.lineWidth = 0.03;
-    ctx.strokeStyle = C.pink;
-    ctx.stroke();
-    circle(ctx, 0, 0, r * 0.09);
-    ctx.fillStyle = C.ink;
-    ctx.fill();
-    return;
-  }
-  if (kind === 'buttons') {
-    circle(ctx, 0, 0, r);
-    inked(ctx, C.teal, lw);
-    circle(ctx, 0, 0, r * 0.72);
-    ctx.lineWidth = 0.03;
-    ctx.strokeStyle = C.tealDark;
-    ctx.stroke();
-    for (const [hx, hy] of [
-      [0.25, 0.25],
-      [-0.25, 0.25],
-      [0.25, -0.25],
-      [-0.25, -0.25],
-    ]) {
-      circle(ctx, hx * r, hy * r, r * 0.12);
-      ctx.fillStyle = C.ink;
-      ctx.fill();
-    }
-    return;
-  }
-  if (kind === 'caps') {
-    ctx.beginPath();
-    const n = 21;
-    for (let i = 0; i <= n * 2; i++) {
-      const a = (i / (n * 2)) * Math.PI * 2;
-      const rr2 = i % 2 ? r : r * 0.9;
-      ctx.lineTo(Math.cos(a) * rr2, Math.sin(a) * rr2);
-    }
-    ctx.closePath();
-    inked(ctx, '#c9cfd8', lw);
-    circle(ctx, 0, 0, r * 0.72);
-    inked(ctx, C.red, lw * 0.6);
-    ctx.fillStyle = C.cream;
-    ctx.fillRect(-r * 0.5, -r * 0.12, r, r * 0.24);
-    circle(ctx, 0, 0, r * 0.1);
-    ctx.fillStyle = C.ink;
-    ctx.fill();
-    return;
-  }
-  // standard: rubber tyre, mustard hub, spokes
+  ctx.rotate(spin);
   circle(ctx, 0, 0, r);
-  inked(ctx, C.ink, lw);
-  circle(ctx, 0, 0, r * 0.62);
-  inked(ctx, C.mustard, lw * 0.6);
-  ctx.lineWidth = 0.045;
-  ctx.strokeStyle = C.mustardDark;
-  ctx.beginPath();
-  for (let i = 0; i < 4; i++) {
-    const a = (i / 4) * Math.PI * 2;
-    ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(a) * r * 0.58, Math.sin(a) * r * 0.58);
-  }
+  inked(ctx, key ? C.teal : C.pink);
+  circle(ctx, 0, 0, r * 0.72);
+  ctx.lineWidth = 0.014;
+  ctx.strokeStyle = 'rgba(26,18,51,0.45)';
   ctx.stroke();
-  circle(ctx, 0, 0, r * 0.16);
-  inked(ctx, C.red, lw * 0.5);
-  // tread notches
-  ctx.fillStyle = C.inkSoft;
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2;
-    circle(ctx, Math.cos(a) * r * 0.82, Math.sin(a) * r * 0.82, 0.03);
+  for (const [hx, hy] of [
+    [-1, -1],
+    [1, -1],
+    [-1, 1],
+    [1, 1],
+  ])
+    circle(ctx, hx * r * 0.25, hy * r * 0.25, r * 0.11), inked(ctx, C.ink, 0.001);
+  ctx.restore();
+  if (key) {
+    // the wind-up key stands out of the hub; it turns while driving
+    ctx.save();
+    ctx.rotate(wind);
+    rr(ctx, -0.025, 0, 0.05, r * 1.25, 0.02);
+    inked(ctx, '#e2b04a', LW * 0.7);
+    ctx.translate(0, r * 1.3);
+    ctx.beginPath();
+    ctx.ellipse(-0.08, 0, 0.08, 0.055, 0, 0, Math.PI * 2);
+    inked(ctx, C.red, LW * 0.7);
+    ctx.beginPath();
+    ctx.ellipse(0.08, 0, 0.08, 0.055, 0, 0, Math.PI * 2);
+    inked(ctx, C.red, LW * 0.7);
+    ctx.restore();
+  }
+}
+
+/** Foil match rocket pointing along +x. Thrust comes out of the back. */
+export function drawRocket(ctx: Ctx, firing: boolean, t: number): void {
+  if (firing) {
+    const f = 0.7 + Math.sin(t * 50) * 0.15 + Math.sin(t * 31) * 0.1;
+    ctx.beginPath();
+    ctx.moveTo(-0.17, 0.06);
+    ctx.quadraticCurveTo(-0.17 - 0.5 * f, 0, -0.17, -0.06);
+    ctx.closePath();
+    ctx.fillStyle = C.fireOrange;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-0.17, 0.035);
+    ctx.quadraticCurveTo(-0.17 - 0.3 * f, 0, -0.17, -0.035);
+    ctx.closePath();
+    ctx.fillStyle = C.fireHot;
     ctx.fill();
   }
-}
-
-/** Suspension strut from a chassis point to the wheel hub (world coords). */
-export function drawStrut(ctx: Ctx, ax: number, ay: number, bx: number, by: number, soft: boolean): void {
-  const n = soft ? 7 : 4;
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len = Math.hypot(dx, dy) || 1;
-  const px = -dy / len;
-  const py = dx / len;
+  // foil body
   ctx.beginPath();
-  ctx.moveTo(ax, ay);
-  for (let i = 1; i < n; i++) {
-    const t = i / n;
-    const s = (i % 2 ? 1 : -1) * 0.07;
-    ctx.lineTo(ax + dx * t + px * s, ay + dy * t + py * s);
+  ctx.moveTo(-0.18, -0.06);
+  ctx.lineTo(0.12, -0.065);
+  ctx.quadraticCurveTo(0.24, 0, 0.12, 0.065);
+  ctx.lineTo(-0.18, 0.06);
+  ctx.closePath();
+  inked(ctx, '#cfd6e6');
+  // crinkles
+  ctx.beginPath();
+  for (const x of [-0.1, -0.02, 0.06]) {
+    ctx.moveTo(x, -0.055);
+    ctx.lineTo(x + 0.03, 0.055);
   }
-  ctx.lineTo(bx, by);
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.lineWidth = 0.07;
-  ctx.strokeStyle = C.ink;
+  ctx.lineWidth = 0.01;
+  ctx.strokeStyle = 'rgba(26,18,51,0.4)';
   ctx.stroke();
-  ctx.lineWidth = 0.03;
-  ctx.strokeStyle = soft ? C.pink : '#c9cfd8';
-  ctx.stroke();
+  // red match head at the tail
+  ctx.beginPath();
+  ctx.ellipse(-0.18, 0, 0.05, 0.07, 0, 0, Math.PI * 2);
+  inked(ctx, C.red);
+  // fins
+  ctx.beginPath();
+  ctx.moveTo(-0.12, 0.06);
+  ctx.lineTo(-0.2, 0.13);
+  ctx.lineTo(-0.04, 0.06);
+  ctx.moveTo(-0.12, -0.06);
+  ctx.lineTo(-0.2, -0.13);
+  ctx.lineTo(-0.04, -0.06);
+  inked(ctx, C.red, LW * 0.7);
 }
 
-// ---------------------------------------------------------------- letters & windows
-
-export function drawLetter(ctx: Ctx, x: number, y: number, t: number, id: number): void {
-  ctx.save();
-  ctx.translate(x, y + Math.sin(t * 3 + id) * 0.08);
-  ctx.rotate(Math.sin(t * 2 + id * 1.7) * 0.25);
-  rr(ctx, -0.3, -0.2, 0.6, 0.4, 0.04);
-  inked(ctx, C.white, 0.05);
+/** Paper sky lantern, drawn centred. `heat` 0..1 lights it from inside. */
+export function drawLantern(ctx: Ctx, heat: number, t: number): void {
+  const w = 0.26;
+  const h = 0.32;
   ctx.beginPath();
-  ctx.moveTo(-0.3, 0.18);
-  ctx.lineTo(0, -0.04);
-  ctx.lineTo(0.3, 0.18);
-  ctx.lineWidth = 0.035;
+  ctx.moveTo(-w * 0.42, -h / 2);
+  ctx.lineTo(-w / 2, h / 2 - 0.03);
+  ctx.quadraticCurveTo(0, h / 2 + 0.05, w / 2, h / 2 - 0.03);
+  ctx.lineTo(w * 0.42, -h / 2);
+  ctx.closePath();
+  inked(ctx, heat > 0 ? '#ffb36b' : '#f06a8a');
+  if (heat > 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.5 + heat * 0.4;
+    ctx.fillStyle = C.fireHot;
+    ctx.beginPath();
+    ctx.ellipse(0, -h * 0.1, w * 0.3, h * 0.35, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  // ribs
+  ctx.beginPath();
+  for (const k of [-0.5, 0, 0.5]) {
+    ctx.moveTo(k * w * 0.42, -h / 2);
+    ctx.lineTo(k * w * 0.5, h / 2 - 0.02);
+  }
+  ctx.lineWidth = 0.012;
+  ctx.strokeStyle = 'rgba(26,18,51,0.5)';
+  ctx.stroke();
+  // burner
+  rr(ctx, -0.05, -h / 2 - 0.035, 0.1, 0.04, 0.01);
+  inked(ctx, '#e2b04a', LW * 0.6);
+  if (heat > 0) drawFlame(ctx, 0, -h / 2 + 0.005, 0.35 * heat, t);
+}
+
+/** Clothes-peg spring with its foot along +x (rotate to aim). */
+export function drawSpring(ctx: Ctx, kick: number): void {
+  const ext = 0.05 + kick * 0.18;
+  // coil
+  ctx.beginPath();
+  const n = 5;
+  for (let i = 0; i <= n * 2; i++) {
+    const x = 0.02 + (i / (n * 2)) * (0.14 + ext);
+    const y = i % 2 ? 0.05 : -0.05;
+    if (i === 0) ctx.moveTo(x, 0);
+    else ctx.lineTo(x, y);
+  }
+  ctx.lineWidth = 0.022;
   ctx.strokeStyle = C.ink;
   ctx.stroke();
-  circle(ctx, 0, -0.04, 0.07);
-  ctx.fillStyle = C.red;
-  ctx.fill();
+  ctx.lineWidth = 0.011;
+  ctx.strokeStyle = '#cfd6e6';
+  ctx.stroke();
+  // wooden peg foot
+  ctx.save();
+  ctx.translate(0.16 + ext, 0);
+  rr(ctx, 0, -0.08, 0.06, 0.16, 0.02);
+  inked(ctx, '#e9c27f', LW * 0.7);
+  ctx.restore();
+  // clip at the pin
+  rr(ctx, -0.04, -0.045, 0.07, 0.09, 0.02);
+  inked(ctx, C.teal, LW * 0.6);
+}
+
+export interface PartState {
+  t: number;
+  flame?: number;
+  spin?: number;
+  wind?: number;
+  firing?: boolean;
+  heat?: number;
+  kick?: number;
+  /** Drawn faded (a placement preview). */
+  ghost?: boolean;
+  bad?: boolean;
+}
+
+/**
+ * Any non-stick part at (x,y), aimed by `dir` (45° steps) and the body angle.
+ * Lanterns are drawn where they float (the caller passes their own position).
+ */
+export function drawPart(ctx: Ctx, kind: Exclude<PartKind, 'stick'>, x: number, y: number, dir: number, angle: number, s: PartState): void {
+  ctx.save();
+  ctx.translate(x, y);
+  if (s.ghost) ctx.globalAlpha = 0.75;
+  if (s.bad) ctx.filter = 'saturate(0.3)';
+  switch (kind) {
+    case 'lamp':
+      ctx.rotate(angle);
+      ctx.translate(0, 0.05);
+      drawLamp(ctx, s.flame ?? 1, s.t, -angle * 0.6);
+      break;
+    case 'wheel':
+    case 'key':
+      drawWheel(ctx, kind === 'key', s.spin ?? angle, s.wind ?? angle);
+      break;
+    case 'rocket':
+      ctx.rotate(angle + (dir * Math.PI) / 4);
+      drawRocket(ctx, !!s.firing, s.t);
+      break;
+    case 'lantern':
+      ctx.rotate(angle);
+      drawLantern(ctx, s.heat ?? 0, s.t);
+      break;
+    case 'spring':
+      ctx.rotate(angle + (dir * Math.PI) / 4);
+      drawSpring(ctx, s.kick ?? 0);
+      break;
+  }
   ctx.restore();
 }
 
-/** A pigeonhole house. Origin at the bottom centre of the house. */
-export function drawHouse(ctx: Ctx, w: number, h: number, lit: number, t: number, inRange: boolean, tone: string): void {
-  const lw = 0.06;
-  // roof + walls
+/** Aim arrow for parts that can be turned. */
+export function drawAim(ctx: Ctx, x: number, y: number, dir: number, color: string): void {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate((dir * Math.PI) / 4);
   ctx.beginPath();
-  ctx.moveTo(-w / 2, 0);
-  ctx.lineTo(w / 2, 0);
-  ctx.lineTo(w / 2, h * 0.62);
-  ctx.lineTo(0, h);
-  ctx.lineTo(-w / 2, h * 0.62);
-  ctx.closePath();
-  inked(ctx, tone, lw);
-  // roof trim
-  ctx.beginPath();
-  ctx.moveTo(-w / 2 - 0.12, h * 0.6);
-  ctx.lineTo(0, h + 0.1);
-  ctx.lineTo(w / 2 + 0.12, h * 0.6);
-  ctx.lineWidth = 0.14;
-  ctx.strokeStyle = C.ink;
-  ctx.lineJoin = 'round';
+  ctx.moveTo(0.3, 0);
+  ctx.lineTo(0.48, 0);
+  ctx.moveTo(0.42, 0.06);
+  ctx.lineTo(0.49, 0);
+  ctx.lineTo(0.42, -0.06);
+  ctx.lineWidth = 0.035;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = color;
   ctx.stroke();
-  ctx.lineWidth = 0.07;
-  ctx.strokeStyle = C.cream;
-  ctx.stroke();
-  // window opening
-  const ox = 0;
-  const oy = h * 0.42;
-  const orad = w * 0.28;
-  if (lit > 0) {
-    const g = ctx.createRadialGradient(ox, oy, 0.05, ox, oy, 2.6 * lit);
-    g.addColorStop(0, 'rgba(255,214,90,0.6)');
-    g.addColorStop(1, 'rgba(255,214,90,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(ox - 2.6, oy - 2.6, 5.2, 5.2);
-  }
-  ctx.beginPath();
-  ctx.moveTo(ox - orad, oy - orad * 0.9);
-  ctx.lineTo(ox - orad, oy + orad * 0.2);
-  ctx.arc(ox, oy + orad * 0.2, orad, Math.PI, 0, true);
-  ctx.lineTo(ox + orad, oy - orad * 0.9);
-  ctx.closePath();
-  inked(ctx, lit > 0 ? C.fire : C.ink, lw);
-  if (lit > 0) {
-    // clerk moth silhouette waving
-    ctx.save();
-    ctx.clip();
-    ctx.fillStyle = C.mustardDark;
-    const wave = Math.sin(t * 10) * 0.25;
-    circle(ctx, ox, oy - orad * 0.3, orad * 0.45);
-    ctx.fill();
-    circle(ctx, ox, oy + orad * 0.35, orad * 0.32);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(ox + orad * 0.3, oy);
-    ctx.lineTo(ox + orad * 0.75, oy + orad * (0.5 + wave));
-    ctx.lineWidth = orad * 0.18;
-    ctx.strokeStyle = C.mustardDark;
-    ctx.stroke();
-    ctx.restore();
-  } else {
-    // sleeping zzz dots / call-out when in range
-    const pulse = inRange ? 0.5 + 0.5 * Math.sin(t * 12) : 0;
-    if (inRange) {
-      circle(ctx, ox, oy, orad * (0.6 + pulse * 0.25));
-      ctx.fillStyle = `rgba(255,210,63,${0.35 + pulse * 0.4})`;
-      ctx.fill();
-    }
-  }
-  // sill
-  rr(ctx, ox - orad - 0.1, oy - orad * 0.9 - 0.08, orad * 2 + 0.2, 0.12, 0.03);
-  inked(ctx, C.cream, lw * 0.7);
-  // letter slot
-  rr(ctx, -w * 0.25, h * 0.08, w * 0.5, 0.1, 0.03);
-  inked(ctx, C.ink, 0.03);
-}
-
-export function drawBookFace(ctx: Ctx, x0: number, x1: number, yTop: number, h: number, tone: number): void {
-  const col = BOOK_TONES[tone % BOOK_TONES.length];
-  rr(ctx, x0, yTop - h, x1 - x0, h, 0.06);
-  inked(ctx, col, 0.05);
-  ctx.fillStyle = C.paper;
-  ctx.fillRect(x0 + 0.1, yTop - h + 0.08, x1 - x0 - 0.2, 0.08);
-  ctx.fillStyle = 'rgba(255,255,255,0.35)';
-  ctx.fillRect(x0 + 0.15, yTop - h * 0.55, (x1 - x0) * 0.3, 0.05);
+  ctx.restore();
 }

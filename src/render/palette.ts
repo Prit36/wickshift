@@ -32,6 +32,12 @@ export const C = {
   wallLit: '#2e347a',
   far: '#3b2f78',
   glass: 'rgba(200,235,255,0.35)',
+  cork: '#c98d55',
+  corkDark: '#a8703f',
+  brass: '#e2b04a',
+  desk: '#8a5a3c',
+  deskTop: '#b97a4e',
+  inkPool: '#141033',
 };
 
 export const BOOK_TONES = ['#e8503a', '#2fb3a0', '#ffc53d', '#4a6cf0', '#ff7aa8', '#59c06b', '#9b6cf0', '#ff8a1f'];
