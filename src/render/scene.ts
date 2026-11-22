@@ -1,13 +1,13 @@
 // The midnight desk: backdrop, level pieces, the build (on the bench or in a run)
 // and the lamp's light. World drawings assume worldTransform() has been set.
 import { C, BOOK_TONES } from './palette';
-import { rr, inked, drawStick, drawPart, drawPin, LW } from './art';
+import { rr, inked, drawStick, drawPart, drawPin, drawCandle, drawProp, LW } from './art';
 import type { Cam } from './view';
 import type { LevelDef, Pt, Zone } from '../sim/level';
 import type { Blueprint } from '../sim/blueprint';
 import { pinPos } from '../sim/blueprint';
 import type { Run } from '../sim/run';
-import { GRID } from '../sim/parts';
+import { GRID, floatUp } from '../sim/parts';
 
 type Ctx = CanvasRenderingContext2D;
 
@@ -19,12 +19,20 @@ function hash(i: number): number {
 }
 
 /** Night sky behind the desk, with a far shelf of book spines that drifts with the camera. */
-export function drawBackdrop(ctx: Ctx, cam: Cam, t: number): void {
+/** Night sky per world: the desk by the window, the bookshelf's teal dark, the hearth's warm glow. */
+const SKIES = [
+  [C.skyTop, C.skyMid, C.skyLow],
+  ['#0f2240', '#1d4766', '#3d7480'],
+  ['#2a1024', '#5a2034', '#b0532e'],
+];
+
+export function drawBackdrop(ctx: Ctx, cam: Cam, t: number, world = 0): void {
   const { W, H } = cam;
+  const sky = SKIES[world % SKIES.length];
   const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, C.skyTop);
-  g.addColorStop(0.6, C.skyMid);
-  g.addColorStop(1, C.skyLow);
+  g.addColorStop(0, sky[0]);
+  g.addColorStop(0.6, sky[1]);
+  g.addColorStop(1, sky[2]);
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, W, H);
   // paper stars
@@ -54,9 +62,11 @@ export function drawBackdrop(ctx: Ctx, cam: Cam, t: number): void {
   ctx.arc(mxw + Math.min(W, H) * 0.03, H * 0.18 - Math.min(W, H) * 0.015, Math.min(W, H) * 0.06, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(243,217,164,0.6)';
   ctx.fill();
-  // far shelf of spines (parallax 0.3)
   const base = H * 0.78 + cam.y * cam.scale * 0.15;
   const off = cam.x * cam.scale * 0.3;
+  if (world === 1) return bookcases(ctx, W, H, base, off);
+  if (world === 2) return hearth(ctx, W, H, base, off, t);
+  // far shelf of spines (parallax 0.3)
   let x = -((off % 600) + 600) % 600 - 600;
   let i = Math.floor(off / 600) * 40;
   while (x < W + 60) {
@@ -73,6 +83,67 @@ export function drawBackdrop(ctx: Ctx, cam: Cam, t: number): void {
   ctx.fillRect(0, base, W, H);
 }
 
+/** Tall bookcases far off: uprights, shelf boards, rows of spines. */
+function bookcases(ctx: Ctx, W: number, H: number, base: number, off: number): void {
+  const bay = 260;
+  const shelfH = 110;
+  let x = -((off % bay) + bay) % bay - bay;
+  let i = Math.floor(off / bay) * 7;
+  const top = base - shelfH * 4;
+  while (x < W + bay) {
+    ctx.fillStyle = '#132c44';
+    ctx.fillRect(x, top, bay, H);
+    for (let sh = 0; sh < 4; sh++) {
+      const sy = top + sh * shelfH;
+      let bx = x + 12;
+      let j = i * 31 + sh * 11;
+      while (bx < x + bay - 20) {
+        const w = 10 + hash(j) * 16;
+        const h = shelfH * (0.55 + hash(j + 1) * 0.35);
+        ctx.fillStyle = hash(j + 2) > 0.5 ? '#244a68' : '#1b3b57';
+        ctx.fillRect(bx, sy + shelfH - h, w - 2, h);
+        bx += w;
+        j++;
+      }
+      ctx.fillStyle = '#0b1c2e';
+      ctx.fillRect(x, sy + shelfH - 6, bay, 8);
+    }
+    ctx.fillStyle = '#0b1c2e';
+    ctx.fillRect(x, top, 10, H);
+    x += bay;
+    i++;
+  }
+  ctx.fillStyle = '#0b1c2e';
+  ctx.fillRect(0, base, W, H);
+}
+
+/** A brick chimney breast lit from below by the fire. */
+function hearth(ctx: Ctx, W: number, H: number, base: number, off: number, t: number): void {
+  const bw = 54;
+  const bh = 24;
+  const top = base - bh * 9;
+  ctx.fillStyle = '#3a1822';
+  ctx.fillRect(0, top, W, H);
+  for (let r = 0; r * bh < H - top; r++) {
+    const shift = (r % 2) * (bw / 2) - (((off % bw) + bw) % bw);
+    for (let x = shift - bw; x < W + bw; x += bw) {
+      const k = hash(Math.floor((x + off) / bw) * 17 + r * 5);
+      ctx.fillStyle = k > 0.66 ? '#552430' : k > 0.33 ? '#4b1f2a' : '#441b27';
+      ctx.fillRect(x + 2, top + r * bh + 2, bw - 4, bh - 4);
+    }
+  }
+  // mantel board
+  ctx.fillStyle = '#20101a';
+  ctx.fillRect(0, top - 14, W, 16);
+  // firelight from below
+  const flick = 0.85 + 0.15 * Math.sin(t * 7.3) * Math.sin(t * 3.1);
+  const g = ctx.createLinearGradient(0, H, 0, top);
+  g.addColorStop(0, `rgba(255,140,60,${0.35 * flick})`);
+  g.addColorStop(1, 'rgba(255,140,60,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, top, W, H - top);
+}
+
 // ---------------------------------------------------------------- level (world space)
 
 function groundPath(ctx: Ctx, line: Pt[], bottom: number): void {
@@ -83,7 +154,10 @@ function groundPath(ctx: Ctx, line: Pt[], bottom: number): void {
   ctx.closePath();
 }
 
-export function drawLevel(ctx: Ctx, L: LevelDef, t: number, s: { delivered: boolean; letterGot: boolean }): void {
+/** Where the loose props are now (from a run), or null for their starting places. */
+export type PropPose = { x: number; y: number; a: number }[] | null;
+
+export function drawLevel(ctx: Ctx, L: LevelDef, t: number, s: { delivered: boolean; letterGot: boolean; props?: PropPose; candlesUsed?: boolean[] }): void {
   const bottom = L.killY - 30;
   // wind first: it lives behind everything
   for (const w of L.wind ?? []) drawWind(ctx, w, t);
@@ -113,7 +187,32 @@ export function drawLevel(ctx: Ctx, L: LevelDef, t: number, s: { delivered: bool
     ctx.stroke();
   }
   L.blocks.forEach((poly, i) => drawBook(ctx, poly, i));
+  (L.candles ?? []).forEach((c, i) => {
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    drawCandle(ctx, !s.candlesUsed?.[i], t, i * 1.7);
+    ctx.restore();
+  });
+  (L.props ?? []).forEach((d, i) => {
+    const p = s.props?.[i] ?? { x: d.x, y: d.y, a: d.angle ?? 0 };
+    if (d.pivot) {
+      // the stand under a see-saw
+      ctx.beginPath();
+      ctx.moveTo(d.x, d.y);
+      ctx.lineTo(d.x - 0.3, d.y - 0.9);
+      ctx.lineTo(d.x + 0.3, d.y - 0.9);
+      ctx.closePath();
+      inked(ctx, '#ff9fb8', LW * 1.2);
+    }
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.a);
+    drawProp(ctx, d.kind, d.w, d.h, BOOK_TONES[(i * 5 + 2) % BOOK_TONES.length], !!d.pivot);
+    ctx.restore();
+    if (d.hinge) drawPin(ctx, d.hinge.x, d.hinge.y, 0.08);
+  });
   for (const z of L.ink ?? []) drawInk(ctx, z, t);
+  for (const z of L.tacks ?? []) drawTacks(ctx, z);
   if (!s.letterGot) drawLetter(ctx, L.letter.x, L.letter.y, t);
 }
 
@@ -168,6 +267,41 @@ function drawInk(ctx: Ctx, z: Zone, t: number): void {
   ctx.lineWidth = 0.05;
   ctx.lineCap = 'round';
   ctx.strokeStyle = 'rgba(120,140,255,0.45)';
+  ctx.stroke();
+}
+
+/** A strip of brass thumbtacks, points out of the strip's long side facing open air. */
+function drawTacks(ctx: Ctx, z: Zone): void {
+  const along = z.w >= z.h;
+  const n = Math.max(1, Math.round((along ? z.w : z.h) / 0.35));
+  for (let i = 0; i < n; i++) {
+    const k = (i + 0.5) / n;
+    const x = along ? z.x + z.w * k : z.x + z.w / 2;
+    const y = along ? z.y + z.h / 2 : z.y + z.h * k;
+    ctx.beginPath();
+    ctx.arc(x, y, 0.11, 0, Math.PI * 2);
+    inked(ctx, C.brass, LW * 0.7);
+    ctx.beginPath();
+    ctx.arc(x - 0.03, y + 0.03, 0.04, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fill();
+  }
+  // the points
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const k = (i + 0.5) / n;
+    if (along) {
+      const x = z.x + z.w * k;
+      ctx.moveTo(x, z.y + z.h / 2 - 0.1);
+      ctx.lineTo(x, z.y - 0.08);
+    } else {
+      const y = z.y + z.h * k;
+      ctx.moveTo(z.x + z.w / 2 - 0.1, y);
+      ctx.lineTo(z.x - 0.08, y);
+    }
+  }
+  ctx.lineWidth = 0.03;
+  ctx.strokeStyle = '#cfd6e6';
   ctx.stroke();
 }
 
@@ -270,18 +404,19 @@ export function drawBlueprint(ctx: Ctx, L: LevelDef, bp: Blueprint, t: number, o
   });
   // lanterns float above their pin on a thread
   bp.parts.forEach((p, i) => {
-    if (i === opts.hidePart || p.kind !== 'lantern') return;
+    if (i === opts.hidePart || (p.kind !== 'lantern' && p.kind !== 'balloon')) return;
     const a = pinPos(p.at);
+    const up = floatUp(p.kind);
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
-    ctx.lineTo(a.x, a.y + 0.55);
+    ctx.lineTo(a.x, a.y + up - (p.kind === 'balloon' ? 0.27 : 0.17));
     ctx.lineWidth = 0.015;
     ctx.strokeStyle = C.paper;
     ctx.stroke();
-    drawPart(ctx, 'lantern', a.x, a.y + 0.72, 2, 0, { t });
+    drawPart(ctx, p.kind, a.x, a.y + up, 2, 0, { t });
   });
   bp.parts.forEach((p, i) => {
-    if (i === opts.hidePart || p.kind === 'lantern') return;
+    if (i === opts.hidePart || p.kind === 'lantern' || p.kind === 'balloon') return;
     const a = pinPos(p.at);
     drawPart(ctx, p.kind, a.x, a.y, p.dir, 0, { t, flame: 1 });
   });
@@ -302,10 +437,27 @@ export function drawRun(ctx: Ctx, r: Run, t: number, kicks: Map<number, number>)
   const m = r.main;
   const p = m.getPosition();
   const a = m.getAngle();
-  // lantern threads
-  for (const l of r.lanterns) {
+  // hook threads, taut to where they caught
+  for (const h of r.hooks) {
+    const to = r.hookAnchor(h);
+    if (!to) continue;
+    const from = m.getWorldPoint(h.local);
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.lineWidth = 0.03;
+    ctx.strokeStyle = C.ink;
+    ctx.stroke();
+    ctx.lineWidth = 0.014;
+    ctx.strokeStyle = C.cream;
+    ctx.stroke();
+    drawPin(ctx, to.x, to.y, 0.05);
+  }
+  // lantern and balloon threads
+  for (const l of [...r.lanterns, ...r.balloons]) {
+    if (l.popped) continue;
     const from = m.getWorldPoint(l.local);
-    const to = l.body.getWorldPoint({ x: 0, y: -0.3 });
+    const to = l.body.getWorldPoint({ x: 0, y: l.part.kind === 'balloon' ? -0.27 : -0.3 });
     ctx.beginPath();
     ctx.moveTo(from.x, from.y);
     ctx.lineTo(to.x, to.y);
@@ -323,6 +475,15 @@ export function drawRun(ctx: Ctx, r: Run, t: number, kicks: Map<number, number>)
   }
   r.rockets.forEach((k) => drawPart(ctx, 'rocket', k.local.x, k.local.y, k.part.dir, 0, { t, firing: r.firing.rockets }));
   r.springs.forEach((k, i) => drawPart(ctx, 'spring', k.local.x, k.local.y, k.part.dir, 0, { t, kick: kicks.get(i) ?? 0 }));
+  for (const q of r.bp.parts) {
+    const at = pinPos(q.at);
+    if (q.kind === 'eraser' || q.kind === 'coin') drawPart(ctx, q.kind, at.x, at.y, 0, 0, { t });
+  }
+  r.hooks.forEach((h) => drawPart(ctx, 'hook', h.local.x, h.local.y, h.part.dir, 0, { t, latched: !!h.joint }));
+  r.umbrellas.forEach((u) => {
+    const at = pinPos(u.part.at);
+    drawPart(ctx, 'umbrella', at.x, at.y, u.part.dir, 0, { t, open: r.firing.umbrellas ? 1 : 0 });
+  });
   const lp = r.bp.parts.find((q) => q.kind === 'lamp');
   if (lp) {
     const lpos = pinPos(lp.at);
@@ -334,7 +495,13 @@ export function drawRun(ctx: Ctx, r: Run, t: number, kicks: Map<number, number>)
     const wp = w.body.getPosition();
     drawPart(ctx, w.part.kind, wp.x, wp.y, 0, a, { t, spin: w.body.getAngle(), wind: a + (w.key && r.firing.drive ? -t * 8 : 0) });
   }
+  for (const l of r.balloons) {
+    if (l.popped) continue;
+    const bp = l.body.getPosition();
+    drawPart(ctx, 'balloon', bp.x, bp.y, 2, l.body.getAngle() * 0.3, { t });
+  }
   for (const l of r.lanterns) {
+    if (l.popped) continue;
     const lp2 = l.body.getPosition();
     drawPart(ctx, 'lantern', lp2.x, lp2.y, 2, l.body.getAngle(), { t, heat: r.firing.lanterns ? 1 : 0 });
   }

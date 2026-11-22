@@ -5,7 +5,7 @@ import { hit } from './app';
 import type { PointerInfo } from './input';
 import type { LevelDef } from '../sim/level';
 import { Run, NO_INPUT, TICK, type RunInput, type OutCause, type RunEvent } from '../sim/run';
-import { CONTROL_INFO, PARTS, type Control } from '../sim/parts';
+import { CONTROL_INFO, CONTROL_ORDER, PARTS, type Control } from '../sim/parts';
 import type { Blueprint } from '../sim/blueprint';
 import { starsFor, type Stars } from '../sim/stars';
 import { C, FONT } from '../render/palette';
@@ -29,10 +29,10 @@ const CAUSE: Record<OutCause | 'fell', [string, string]> = {
   fire: ['BURNED DRY', 'The fire parts burned the last of the oil. Shorter bursts, or fewer of them.'],
   tipped: ['SPILLED', 'Upside down too long and the oil ran out. Try a lower lamp or a wider base.'],
   ink: ['INKED', 'Into the inkwell. Something has to carry you over it.'],
-  fell: ['LOST', 'Off the edge of the desk.'],
+  fell: ['LOST', 'Off the edge. A hook, an umbrella or a lantern could have caught you.'],
 };
 
-const CONTROL_ORDER: Control[] = ['drive', 'rockets', 'lanterns', 'springs'];
+const PAD_COLOR: Record<Control, string> = { drive: C.teal, rockets: C.red, lanterns: C.pink, springs: C.mustard, hooks: C.blue, umbrellas: C.green };
 
 export class Play implements Screen {
   run: Run;
@@ -42,6 +42,9 @@ export class Play implements Screen {
   private pads: { c: Control; x: number; y: number; r: number }[] = [];
   private touchHeld = new Map<number, Control>();
   private springQueued = false;
+  private hookQueued = false;
+  /** Hook threads drawn flying out (world from/to, age). */
+  private threads: { fx: number; fy: number; x: number; y: number; hit: boolean; t: number }[] = [];
   private kicks = new Map<number, number>();
   private controls: Control[];
   private endT = -1;
@@ -73,8 +76,11 @@ export class Play implements Screen {
       rockets: k.isHeld('w') || k.isHeld('ArrowUp') || held.has('rockets'),
       lanterns: k.isHeld('e') || held.has('lanterns'),
       springs: this.springQueued,
+      umbrellas: k.isHeld('a') || held.has('umbrellas'),
+      hooks: this.hookQueued,
     };
     this.springQueued = false;
+    this.hookQueued = false;
     return inp;
   }
 
@@ -87,6 +93,7 @@ export class Play implements Screen {
     for (const pad of this.pads) {
       if (Math.hypot(p.x - pad.x, p.y - pad.y) <= pad.r * 1.15) {
         if (pad.c === 'springs') this.springQueued = true;
+        else if (pad.c === 'hooks') this.hookQueued = true;
         else this.touchHeld.set(p.id, pad.c);
         return;
       }
@@ -96,7 +103,7 @@ export class Play implements Screen {
     // sliding a thumb between pads switches which one is held
     if (!this.touchHeld.has(p.id)) return;
     for (const pad of this.pads)
-      if (pad.c !== 'springs' && Math.hypot(p.x - pad.x, p.y - pad.y) <= pad.r * 1.15) {
+      if (CONTROL_INFO[pad.c].hold && Math.hypot(p.x - pad.x, p.y - pad.y) <= pad.r * 1.15) {
         this.touchHeld.set(p.id, pad.c);
         return;
       }
@@ -121,6 +128,7 @@ export class Play implements Screen {
     this.result = null;
     this.stampsPlayed = 0;
     this.kicks.clear();
+    this.threads = [];
     this.app.fx.clear();
     sfx.go();
   }
@@ -133,6 +141,7 @@ export class Play implements Screen {
       if (k === 'r' || k === 'Escape') return this.host.rebuild();
       if (k === 't') return this.restart();
       if (k === 'q' || k === 'ArrowDown') this.springQueued = true;
+      if (k === 'f') this.hookQueued = true;
       if (k === 'm') this.app.toggleMute();
       if (k === 'Enter' && this.result) {
         if (this.result.stars[0] && this.host.hasNext()) this.host.next();
@@ -148,10 +157,13 @@ export class Play implements Screen {
       for (const e of r.events) this.onEvent(e);
     }
     for (const [i, v] of this.kicks) this.kicks.set(i, Math.max(0, v - dt * 4));
+    for (const th of this.threads) th.t += dt;
+    this.threads = this.threads.filter((th) => th.t < 0.35);
     // sound loops
     sfx.rocket(r.firing.rockets);
     sfx.lantern(r.firing.lanterns);
     sfx.drive(r.firing.drive, r.speed);
+    sfx.umbrella(r.firing.umbrellas, r.speed);
     if (r.firing.rockets && !this.wasFiring.rockets) sfx.ignite();
     this.wasFiring = { rockets: r.firing.rockets, lanterns: r.firing.lanterns };
     // smoke and sparks from working parts
@@ -225,6 +237,27 @@ export class Play implements Screen {
         if (e.hit) fx.burst(e.x, e.y, 6, 'dust', 'rgba(255,241,207,0.6)', 1.5, 0.12, 0.5, 0);
         break;
       }
+      case 'hook':
+        sfx.hook(e.hit);
+        this.threads.push({ fx: e.fx, fy: e.fy, x: e.x, y: e.y, hit: e.hit, t: 0 });
+        if (e.hit) fx.burst(e.x, e.y, 5, 'dust', 'rgba(255,241,207,0.7)', 1.2, 0.08, 0.4, 0);
+        break;
+      case 'unhook':
+        sfx.unhook();
+        break;
+      case 'candle':
+        sfx.candle();
+        fx.burst(e.x, e.y, 16, 'spark', [C.fire, C.fireHot, C.fireOrange], 3, 0.06, 0.7, -1);
+        fx.pop('+FLAME', e.x, e.y + 0.6, C.fire, '', 0.9, 0.9);
+        break;
+      case 'pop':
+        sfx.pop();
+        fx.burst(e.x, e.y, 12, 'paper', e.kind === 'balloon' ? ['#ff5a6e', C.cream] : ['#f06a8a', C.mustard], 3.5, 0.07, 0.8);
+        fx.pop('POP!', e.x, e.y + 0.4, C.red, '', 0.8, 0.8);
+        break;
+      case 'bounce':
+        sfx.bounce();
+        break;
       case 'letter':
         sfx.letter();
         fx.burst(e.x, e.y, 14, 'paper', [C.cream, C.red, C.mustard], 4, 0.08, 1);
@@ -252,10 +285,16 @@ export class Play implements Screen {
     const { ctx, dpr, W, H, s, t, fx } = this.app;
     const r = this.run;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    drawBackdrop(ctx, this.cam, t);
+    drawBackdrop(ctx, this.cam, t, this.level.world);
     worldTransform(ctx, this.cam, dpr, fx.shakeOffset(t));
-    drawLevel(ctx, this.level, t, { delivered: r.outcome === 'delivered', letterGot: r.letterGot });
+    drawLevel(ctx, this.level, t, {
+      delivered: r.outcome === 'delivered',
+      letterGot: r.letterGot,
+      candlesUsed: r.candlesUsed,
+      props: r.props.map((p) => ({ x: p.body.getPosition().x, y: p.body.getPosition().y, a: p.body.getAngle() })),
+    });
     drawRun(ctx, r, t, this.kicks);
+    for (const th of this.threads) drawThreadShot(ctx, th);
     const lp = r.lampPos();
     drawLampLight(ctx, lp.x, lp.y + 0.1, r.flame, t);
     fx.drawWorld(ctx);
@@ -347,15 +386,31 @@ export class Play implements Screen {
     // control pads, bottom right (big for thumbs; labelled with keys for keyboards)
     this.pads = [];
     if (!this.result) {
-      const pr = (touch ? 52 : 44) * s;
+      const n = this.controls.length;
+      let pr = (touch ? 52 : 44) * s;
+      const gap = 16 * s;
+      // as many per row as fit; a second row above when they don't
+      let perRow = Math.max(1, Math.floor((W - 24 * s + gap) / (pr * 2 + gap)));
+      if (perRow < n && perRow < 3) {
+        pr = Math.max(34 * s, (W - 24 * s - 2 * gap) / 6);
+        perRow = Math.max(1, Math.floor((W - 24 * s + gap) / (pr * 2 + gap)));
+      }
       const held = new Set(this.touchHeld.values());
-      const active: Record<Control, boolean> = { drive: r.firing.drive, rockets: r.firing.rockets, lanterns: r.firing.lanterns, springs: [...this.kicks.values()].some((v) => v > 0.6) };
+      const active: Record<Control, boolean> = {
+        drive: r.firing.drive,
+        rockets: r.firing.rockets,
+        lanterns: r.firing.lanterns,
+        springs: [...this.kicks.values()].some((v) => v > 0.6),
+        hooks: r.hooks.some((h) => h.joint),
+        umbrellas: r.firing.umbrellas,
+      };
       this.controls.forEach((c, i) => {
-        const x = W - 20 * s - pr - i * (pr * 2 + 16 * s);
-        const y = H - 24 * s - pr;
+        const row = Math.floor(i / perRow);
+        const x = W - 20 * s - pr - (i % perRow) * (pr * 2 + gap);
+        const y = H - 24 * s - pr - row * (pr * 2 + gap * 0.8);
         this.pads.push({ c, x, y, r: pr });
         const on = active[c] || held.has(c);
-        const col: Record<Control, string> = { drive: C.teal, rockets: C.red, lanterns: C.pink, springs: C.mustard };
+        const col = PAD_COLOR;
         ctx.beginPath();
         ctx.arc(x + 4 * s, y + 6 * s, pr, 0, Math.PI * 2);
         ctx.fillStyle = C.ink;
@@ -370,7 +425,7 @@ export class Play implements Screen {
         const info = CONTROL_INFO[c];
         text(ctx, info.label, x, y - 6 * s + (on ? 3 * s : 0), fitSize(ctx, info.label, pr * 1.7, 20 * s), C.cream, 'center', 4 * s);
         if (!touch) keycap(ctx, info.key, x, y + 18 * s + (on ? 3 * s : 0), s * 0.85);
-        else text(ctx, info.hold ? 'HOLD' : 'TAP', x, y + 16 * s, 13 * s, C.cream, 'center', 3 * s);
+        else text(ctx, c === 'hooks' && on ? 'LET GO' : info.hold ? 'HOLD' : 'TAP', x, y + 16 * s, 13 * s, C.cream, 'center', 3 * s);
       });
     }
     // first-run nudge: nothing pressed yet and nothing moving
@@ -429,4 +484,20 @@ export class Play implements Screen {
     else if (won) mk('levels', 'JOBS', 2, C.green, '');
     else mk('levels', 'JOBS', 2, C.teal, '');
   }
+}
+
+/** A hook's thread whipping out: a line growing to where it caught (or fell short). */
+function drawThreadShot(ctx: CanvasRenderingContext2D, th: { fx: number; fy: number; x: number; y: number; hit: boolean; t: number }): void {
+  const k = Math.min(1, th.t / 0.08);
+  const fade = th.hit ? 1 : Math.max(0, 1 - (th.t - 0.08) / 0.25);
+  ctx.save();
+  ctx.globalAlpha = fade;
+  ctx.beginPath();
+  ctx.moveTo(th.fx, th.fy);
+  ctx.lineTo(th.fx + (th.x - th.fx) * k, th.fy + (th.y - th.fy) * k);
+  ctx.setLineDash(th.hit ? [] : [0.08, 0.08]);
+  ctx.lineWidth = 0.025;
+  ctx.strokeStyle = C.cream;
+  ctx.stroke();
+  ctx.restore();
 }

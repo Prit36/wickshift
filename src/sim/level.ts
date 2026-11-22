@@ -17,11 +17,31 @@ export interface Wind extends Zone {
   fy: number;
 }
 
-export type StarKind = 'flame' | 'time' | 'max';
+export type StarKind = 'flame' | 'time' | 'max' | 'nofire' | 'candles';
+
+/** Something loose in the level: a book to shove, a ruler on a pivot, a cotton reel. */
+export interface Prop {
+  kind: 'book' | 'ruler' | 'reel';
+  /** Centre. */
+  x: number;
+  y: number;
+  /** Size (a reel uses w as its diameter). */
+  w: number;
+  h: number;
+  angle?: number;
+  /** Mass per square metre; books are heavy, rulers light. */
+  density?: number;
+  /** Pinned to the level at its centre, free to turn (a see-saw). */
+  pivot?: boolean;
+  /** Pinned to the level at this point instead, free to turn (a drawbridge). */
+  hinge?: { x: number; y: number };
+}
 
 export interface LevelDef {
   id: string;
   num: number;
+  /** 0-based world (page on the job board). */
+  world: number;
   name: string;
   /** Shown on the level slip: the question this level asks. */
   ask: string;
@@ -35,6 +55,15 @@ export interface LevelDef {
   /** Ink: touching it with the lamp puts the flame out. */
   ink?: Zone[];
   wind?: Wind[];
+  props?: Prop[];
+  /** The part this job is about, shown on its ticket (default: the newest part in its kit). */
+  feature?: PartKind;
+  /** Flame at launch, when the wick starts low (default full). */
+  startFlame?: number;
+  /** Rows of thumbtacks: they pop balloons and tear lanterns that touch them. */
+  tacks?: Zone[];
+  /** Candle stubs standing on the desk (x, y of the base). Pass the lamp by one to top up its flame. */
+  candles?: { x: number; y: number }[];
   window: Zone;
   letter: { x: number; y: number };
   kit: Kit;

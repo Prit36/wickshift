@@ -1,6 +1,6 @@
 // A build: matchsticks between pins, and parts pinned onto stick ends.
 // Pure data, shared by the bench (editing) and the run (physics).
-import { GRID, MAX_STICK, PARTS, type PartKind } from './parts';
+import { ALL_KINDS, GRID, MAX_STICK, PARTS, type PartKind } from './parts';
 
 export type Pin = [number, number];
 
@@ -45,7 +45,8 @@ export function nodes(b: Blueprint): Set<string> {
 }
 
 export function used(b: Blueprint): Record<PartKind, number> {
-  const u: Record<PartKind, number> = { stick: b.sticks.length, lamp: 0, wheel: 0, key: 0, rocket: 0, lantern: 0, spring: 0 };
+  const u = Object.fromEntries(ALL_KINDS.map((k) => [k, 0])) as Record<PartKind, number>;
+  u.stick = b.sticks.length;
   for (const p of b.parts) u[p.kind]++;
   return u;
 }

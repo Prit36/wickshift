@@ -1,5 +1,6 @@
 // Tiny versioned local save. Storage failures fall back to memory silently.
 import type { Blueprint } from '../sim/blueprint';
+import { ALL_KINDS } from '../sim/parts';
 import type { Stars } from '../sim/stars';
 
 const KEY = 'wickshift.save';
@@ -35,7 +36,7 @@ function cleanBuild(b: unknown): Blueprint | undefined {
   const o = b as { sticks?: unknown; parts?: unknown };
   if (!Array.isArray(o.sticks) || !Array.isArray(o.parts)) return undefined;
   const sticks = o.sticks.filter((s): s is Blueprint['sticks'][number] => !!s && isPin((s as { a: unknown }).a) && isPin((s as { b: unknown }).b));
-  const kinds = ['lamp', 'wheel', 'key', 'rocket', 'lantern', 'spring'];
+  const kinds: string[] = ALL_KINDS.filter((k) => k !== 'stick');
   const parts = o.parts.filter((p): p is Blueprint['parts'][number] => !!p && kinds.includes((p as { kind: string }).kind) && isPin((p as { at: unknown }).at) && Number.isInteger((p as { dir: unknown }).dir));
   return { sticks, parts };
 }

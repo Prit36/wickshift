@@ -6,7 +6,7 @@ import { loadSave, writeSave, type Save } from './save';
 import { Menu } from './menu';
 import { Bench } from './bench';
 import { Play } from './play';
-import { LEVELS } from '../sim/levels';
+import { ALL, jobOpen, levelsIn } from '../sim/all-levels';
 import type { LevelDef } from '../sim/level';
 import { clone, emptyBlueprint, type Blueprint } from '../sim/blueprint';
 import type { Stars } from '../sim/stars';
@@ -105,6 +105,8 @@ export class Game implements App {
     const start = this.drafts.get(L.id) ?? this.save.levels[L.id]?.build ?? L.starter ?? emptyBlueprint();
     this.fx.clear();
     sfx.stopLoops();
+    sfx.world = L.world;
+    sfx.boss = L === levelsIn(L.world).at(-1);
     this.bench = new Bench(this, L, start, {
       launch: (bp) => this.launch(L, bp),
       back: () => {
@@ -113,6 +115,12 @@ export class Game implements App {
       },
     });
     this.setScreen(this.bench);
+  }
+
+  /** The job after this one, if it's open. */
+  private nextAfter(L: LevelDef): LevelDef | null {
+    const nx = ALL[ALL.indexOf(L) + 1];
+    return nx && jobOpen(nx, (id) => !!this.save.levels[id]?.stars[0]) ? nx : null;
   }
 
   private launch(L: LevelDef, bp: Blueprint): void {
@@ -124,12 +132,12 @@ export class Game implements App {
     this.play = new Play(this, L, bp, {
       rebuild: () => this.rebuild(),
       next: () => {
-        const i = LEVELS.indexOf(L);
-        if (i + 1 < LEVELS.length) this.openBench(LEVELS[i + 1]);
+        const nx = this.nextAfter(L);
+        if (nx) this.openBench(nx);
         else this.toMenu();
       },
       levels: () => this.toMenu(),
-      hasNext: () => LEVELS.indexOf(L) + 1 < LEVELS.length,
+      hasNext: () => !!this.nextAfter(L),
       record: (stars) => this.record(L, stars),
     }, this.bench?.camera ?? null);
     this.setScreen(this.play);
@@ -157,6 +165,7 @@ export class Game implements App {
   private toMenu(): void {
     sfx.stopLoops();
     this.fx.clear();
+    this.menu.refresh();
     this.setScreen(this.menu);
   }
 }

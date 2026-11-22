@@ -71,3 +71,62 @@ export function nearObstacle(xs: number[], dist: number, key: keyof RunInput, se
     return { drive: true, [key]: key === 'springs' ? r.tick === on : fire };
   };
 }
+
+/** Drive; shoot the hook once the lamp passes `latchX`; let go once past the anchor by `past` and no longer rising fast, or once over `overX` (a player lets go over the landing). */
+export function hookSwing(latchX: number, past: number, overX = Infinity, extra: (r: Run) => Partial<RunInput> = () => ({})): (r: Run) => Partial<RunInput> {
+  let shot = false;
+  let done = false;
+  return (r) => {
+    const base = { drive: true, ...extra(r) };
+    const p = r.lampPos();
+    const h = r.hooks[0];
+    if (!shot && p.x >= latchX) {
+      shot = true;
+      return { ...base, hooks: true };
+    }
+    const an = h?.joint ? r.hookAnchor(h) : null;
+    const v = r.main.getLinearVelocity();
+    if (!done && an && ((p.x > an.x + past && v.x > 0 && v.y < 0.5) || p.x > overX)) {
+      done = true;
+      return { ...base, hooks: true };
+    }
+    return base;
+  };
+}
+
+/** Swing a row of gaps: shoot once the lamp passes latch[i]; let go once past the anchor by `past` and no longer rising, or past over[i]. */
+export function hookSwings(latch: number[], past: number, over: number[]): (r: Run) => Partial<RunInput> {
+  let i = 0;
+  return (r) => {
+    const p = r.lampPos();
+    const h = r.hooks.find((q) => q.joint);
+    const k = i >> 1;
+    if (k < latch.length) {
+      if (i % 2 === 0 && p.x > latch[k]) {
+        i++;
+        return { drive: true, hooks: true };
+      }
+      const an = h ? r.hookAnchor(h) : null;
+      const v = r.main.getLinearVelocity();
+      if (i % 2 === 1 && an && ((p.x > an.x + past && v.x > 0 && v.y < 0.5) || p.x > over[k])) {
+        i++;
+        return { drive: true, hooks: true };
+      }
+    }
+    return { drive: true };
+  };
+}
+
+/** Fire `key` for `sec` once the front wheel comes within `dist` of each edge in turn. */
+export function atEdges(xs: number[], dist: number, key: keyof RunInput, sec: number): (r: Run) => Partial<RunInput> {
+  let i = 0;
+  let on = -1;
+  return (r) => {
+    const fx = Math.max(...r.wheels.map((q) => q.body.getPosition().x));
+    if (i < xs.length && fx > xs[i] - dist) {
+      i++;
+      on = r.tick;
+    }
+    return { drive: true, [key]: on >= 0 && r.tick - on < sec * 60 };
+  };
+}

@@ -297,6 +297,258 @@ export function drawSpring(ctx: Ctx, kick: number): void {
   inked(ctx, C.teal, LW * 0.6);
 }
 
+/** Paperclip hook pointing along +x: a bent wire loop with a barb at the tip. */
+export function drawHook(ctx: Ctx, latched: boolean): void {
+  // clip at the pin
+  rr(ctx, -0.05, -0.05, 0.08, 0.1, 0.02);
+  inked(ctx, C.blue, LW * 0.6);
+  // the wire, drawn twice: ink underneath, silver on top
+  const wire = () => {
+    ctx.beginPath();
+    ctx.moveTo(0.02, -0.035);
+    ctx.lineTo(0.2, -0.035);
+    ctx.arc(0.2, 0, 0.035, -Math.PI / 2, Math.PI / 2);
+    ctx.lineTo(0.06, 0.035);
+    ctx.arc(0.06, 0.01, 0.025, Math.PI / 2, -Math.PI / 2, false);
+    ctx.lineTo(0.17, -0.015);
+  };
+  wire();
+  ctx.lineWidth = 0.03;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = C.ink;
+  ctx.stroke();
+  wire();
+  ctx.lineWidth = 0.014;
+  ctx.strokeStyle = latched ? C.fireHot : '#dfe6f2';
+  ctx.stroke();
+  // barb
+  ctx.beginPath();
+  ctx.moveTo(0.23, 0);
+  ctx.lineTo(0.29, 0.05);
+  ctx.moveTo(0.23, 0);
+  ctx.lineTo(0.29, -0.05);
+  ctx.lineWidth = 0.022;
+  ctx.strokeStyle = C.ink;
+  ctx.stroke();
+}
+
+/** Cocktail umbrella: shaft along +x, canopy facing +x. `open` 0..1. */
+export function drawUmbrella(ctx: Ctx, open: number): void {
+  const reach = 0.34;
+  // shaft
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(reach + 0.06, 0);
+  ctx.lineWidth = 0.035;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = C.ink;
+  ctx.stroke();
+  ctx.lineWidth = 0.016;
+  ctx.strokeStyle = '#e9c27f';
+  ctx.stroke();
+  // canopy: a shallow dome when open, a furled cone when shut
+  const half = 0.1 + open * 0.22;
+  const depth = 0.16 - open * 0.06;
+  const base = reach - depth * 0.4;
+  const panels = 4;
+  for (let i = 0; i < panels; i++) {
+    const y0 = -half + (i * 2 * half) / panels;
+    const y1 = -half + ((i + 1) * 2 * half) / panels;
+    ctx.beginPath();
+    ctx.moveTo(reach + 0.08, 0);
+    ctx.lineTo(base, y0);
+    ctx.quadraticCurveTo(base - 0.04, (y0 + y1) / 2, base, y1);
+    ctx.closePath();
+    inked(ctx, i % 2 ? C.cream : C.red, LW * 0.7);
+  }
+  // knob
+  ctx.beginPath();
+  ctx.arc(reach + 0.09, 0, 0.025, 0, Math.PI * 2);
+  inked(ctx, C.mustard, LW * 0.5);
+  // clip at the pin
+  rr(ctx, -0.04, -0.045, 0.07, 0.09, 0.02);
+  inked(ctx, C.green, LW * 0.6);
+}
+
+/** Two-tone rubber eraser, centred. */
+export function drawEraser(ctx: Ctx, squash = 0): void {
+  const w = 0.34 * (1 + squash * 0.15);
+  const h = 0.22 * (1 - squash * 0.2);
+  rr(ctx, -w / 2, -h / 2, w, h, 0.05);
+  inked(ctx, '#ff9fb8');
+  ctx.save();
+  rr(ctx, -w / 2, -h / 2, w, h, 0.05);
+  ctx.clip();
+  ctx.fillStyle = '#5f8cff';
+  ctx.fillRect(w * 0.08, -h / 2, w, h);
+  ctx.restore();
+  rr(ctx, -w / 2, -h / 2, w, h, 0.05);
+  ctx.lineWidth = LW;
+  ctx.strokeStyle = C.ink;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(w * 0.08, -h / 2);
+  ctx.lineTo(w * 0.08, h / 2);
+  ctx.lineWidth = LW * 0.6;
+  ctx.stroke();
+  // rubbed-down corner shine
+  ctx.beginPath();
+  ctx.moveTo(-w * 0.38, h * 0.25);
+  ctx.lineTo(-w * 0.2, h * 0.25);
+  ctx.lineWidth = 0.014;
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.stroke();
+}
+
+/** Party balloon, centred on the balloon, knot at the bottom. */
+export function drawBalloon(ctx: Ctx, t: number, tone = '#ff5a6e'): void {
+  const r = 0.27;
+  ctx.save();
+  ctx.rotate(Math.sin(t * 1.3) * 0.05);
+  ctx.beginPath();
+  ctx.ellipse(0, 0.02, r * 0.9, r * 1.02, 0, 0, Math.PI * 2);
+  inked(ctx, tone);
+  // knot
+  ctx.beginPath();
+  ctx.moveTo(-0.04, -r - 0.04);
+  ctx.lineTo(0.04, -r - 0.04);
+  ctx.lineTo(0, -r + 0.01);
+  ctx.closePath();
+  inked(ctx, tone, LW * 0.6);
+  // shine
+  ctx.beginPath();
+  ctx.ellipse(-r * 0.35, r * 0.35, r * 0.14, r * 0.26, -0.5, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.fill();
+  ctx.restore();
+}
+
+/** Brass coin with a stamped star. */
+export function drawCoin(ctx: Ctx): void {
+  const r = 0.14;
+  circle(ctx, 0, 0, r);
+  inked(ctx, '#e2b04a');
+  circle(ctx, 0, 0, r * 0.75);
+  ctx.lineWidth = 0.012;
+  ctx.strokeStyle = 'rgba(26,18,51,0.5)';
+  ctx.stroke();
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    const rad = i % 2 ? r * 0.25 : r * 0.55;
+    ctx.lineTo(Math.cos(a) * rad, -Math.sin(a) * rad);
+  }
+  ctx.closePath();
+  ctx.fillStyle = '#b8862c';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(-r * 0.35, r * 0.4, r * 0.18, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.fill();
+}
+
+/** A candle stub standing on (0,0). Lit until the lamp drinks its flame. */
+export function drawCandle(ctx: Ctx, lit: boolean, t: number, seed = 0): void {
+  const w = 0.2;
+  const h = 0.38;
+  // wax drips
+  rr(ctx, -w / 2, 0, w, h, 0.03);
+  inked(ctx, C.cream);
+  ctx.beginPath();
+  ctx.moveTo(-w / 2, h - 0.04);
+  ctx.quadraticCurveTo(-w * 0.3, h - 0.14, -w * 0.15, h - 0.04);
+  ctx.quadraticCurveTo(w * 0.1, h - 0.1, w * 0.25, h - 0.03);
+  ctx.lineWidth = 0.012;
+  ctx.strokeStyle = 'rgba(26,18,51,0.35)';
+  ctx.stroke();
+  // saucer
+  ctx.beginPath();
+  ctx.ellipse(0, 0.01, w * 0.95, 0.04, 0, 0, Math.PI * 2);
+  inked(ctx, C.brass, LW * 0.7);
+  // wick
+  ctx.beginPath();
+  ctx.moveTo(0, h);
+  ctx.lineTo(0, h + 0.05);
+  ctx.lineWidth = 0.014;
+  ctx.strokeStyle = C.ink;
+  ctx.stroke();
+  if (lit) {
+    // a glow so it reads as a pick-up
+    const g = ctx.createRadialGradient(0, h + 0.12, 0.02, 0, h + 0.12, 0.6);
+    g.addColorStop(0, 'rgba(255,214,110,0.45)');
+    g.addColorStop(1, 'rgba(255,170,60,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(-0.6, h - 0.5, 1.2, 1.2);
+    drawFlame(ctx, 0, h + 0.04, 0.7, t + seed);
+  } else {
+    // a curl of smoke
+    ctx.beginPath();
+    const k = (t * 0.5 + seed) % 1;
+    ctx.moveTo(0, h + 0.06);
+    ctx.bezierCurveTo(0.08, h + 0.2, -0.08, h + 0.3, 0.03, h + 0.45 + k * 0.1);
+    ctx.lineWidth = 0.02;
+    ctx.strokeStyle = 'rgba(200,190,230,0.35)';
+    ctx.stroke();
+  }
+}
+
+/** Loose level props, centred, in their own frame. */
+export function drawProp(ctx: Ctx, kind: 'book' | 'ruler' | 'reel', w: number, h: number, tone: string, pivot: boolean): void {
+  if (kind === 'reel') {
+    const r = w / 2;
+    circle(ctx, 0, 0, r);
+    inked(ctx, '#e9c27f');
+    circle(ctx, 0, 0, r * 0.78);
+    inked(ctx, tone, LW * 0.7);
+    ctx.beginPath();
+    for (let i = -3; i <= 3; i++) {
+      ctx.moveTo(-r * 0.7, (i * r) / 5);
+      ctx.lineTo(r * 0.7, (i * r) / 5 + 0.02);
+    }
+    ctx.lineWidth = 0.008;
+    ctx.strokeStyle = 'rgba(26,18,51,0.3)';
+    ctx.stroke();
+    // a spoke so you can see it turn
+    rr(ctx, -r * 0.08, -r * 0.7, r * 0.16, r * 1.4, 0.01);
+    ctx.fillStyle = 'rgba(26,18,51,0.25)';
+    ctx.fill();
+    circle(ctx, 0, 0, r * 0.22);
+    inked(ctx, '#e9c27f', LW * 0.6);
+    circle(ctx, 0, 0, r * 0.08);
+    ctx.fillStyle = C.ink;
+    ctx.fill();
+    return;
+  }
+  if (kind === 'ruler') {
+    rr(ctx, -w / 2, -h / 2, w, h, 0.02);
+    inked(ctx, '#ffd86b');
+    ctx.beginPath();
+    for (let x = -w / 2 + 0.1, i = 0; x < w / 2 - 0.05; x += 0.1, i++) {
+      ctx.moveTo(x, h / 2);
+      ctx.lineTo(x, h / 2 - (i % 5 === 0 ? h * 0.55 : h * 0.3));
+    }
+    ctx.lineWidth = 0.012;
+    ctx.strokeStyle = 'rgba(26,18,51,0.6)';
+    ctx.stroke();
+  } else {
+    rr(ctx, -w / 2, -h / 2, w, h, 0.03);
+    inked(ctx, tone, LW * 1.2);
+    // page edge along the top, and two bands across the cover
+    ctx.fillStyle = C.cream;
+    ctx.fillRect(-w / 2 + 0.06, h / 2 - 0.08, w - 0.12, 0.04);
+    ctx.fillStyle = 'rgba(255,241,207,0.5)';
+    const across = w > h;
+    if (across) {
+      ctx.fillRect(-w / 2 + w * 0.15, -h / 2, 0.05, h);
+      ctx.fillRect(w / 2 - w * 0.15 - 0.05, -h / 2, 0.05, h);
+    } else {
+      ctx.fillRect(-w / 2, -h / 2 + h * 0.15, w, 0.05);
+      ctx.fillRect(-w / 2, h / 2 - h * 0.15 - 0.05, w, 0.05);
+    }
+  }
+  if (pivot) drawPin(ctx, 0, 0, 0.07);
+}
+
 export interface PartState {
   t: number;
   flame?: number;
@@ -305,6 +557,9 @@ export interface PartState {
   firing?: boolean;
   heat?: number;
   kick?: number;
+  /** Umbrella openness 0..1, hook latched. */
+  open?: number;
+  latched?: boolean;
   /** Drawn faded (a placement preview). */
   ghost?: boolean;
   bad?: boolean;
@@ -340,6 +595,26 @@ export function drawPart(ctx: Ctx, kind: Exclude<PartKind, 'stick'>, x: number, 
     case 'spring':
       ctx.rotate(angle + (dir * Math.PI) / 4);
       drawSpring(ctx, s.kick ?? 0);
+      break;
+    case 'hook':
+      ctx.rotate(angle + (dir * Math.PI) / 4);
+      drawHook(ctx, !!s.latched);
+      break;
+    case 'umbrella':
+      ctx.rotate(angle + (dir * Math.PI) / 4);
+      drawUmbrella(ctx, s.open ?? 0);
+      break;
+    case 'eraser':
+      ctx.rotate(angle);
+      drawEraser(ctx);
+      break;
+    case 'coin':
+      ctx.rotate(angle);
+      drawCoin(ctx);
+      break;
+    case 'balloon':
+      ctx.rotate(angle);
+      drawBalloon(ctx, s.t);
       break;
   }
   ctx.restore();

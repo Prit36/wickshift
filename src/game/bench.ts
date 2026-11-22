@@ -5,8 +5,8 @@ import type { App, Btn, Screen } from './app';
 import { hit } from './app';
 import type { PointerInfo } from './input';
 import type { LevelDef } from '../sim/level';
-import { LEVELS } from '../sim/levels';
-import { CONTROL_INFO, GRID, PARTS, TRAY_ORDER, type PartKind } from '../sim/parts';
+import { ALL } from '../sim/all-levels';
+import { CONTROL_INFO, GRID, PARTS, TRAY_ORDER, floatUp, type PartKind } from '../sim/parts';
 import { clone, inArea, left, launchProblem, nodes, partProblem, pinKey, pinPos, removeStick, samePin, stickProblem, type Blueprint, type Pin, type Placed } from '../sim/blueprint';
 import { Run } from '../sim/run';
 import { C, FONT, BODY } from '../render/palette';
@@ -52,7 +52,7 @@ export class Bench implements Screen {
     private host: BenchHost,
   ) {
     this.bp = clone(start);
-    const prev = LEVELS.find((l) => l.num === level.num - 1);
+    const prev = ALL[ALL.indexOf(level) - 1];
     this.newKinds = new Set(TRAY_ORDER.filter((k) => (level.kit[k] ?? 0) > 0 && !(prev?.kit[k] ?? 0)));
     if (level.num === 1) this.newKinds = new Set(['wheel']);
     this.refresh();
@@ -210,7 +210,7 @@ export class Bench implements Screen {
     this.bp.parts.forEach((p, i) => {
       const a = pinPos(p.at);
       const px = o.x + a.x;
-      const py = o.y + a.y + (p.kind === 'lantern' ? 0.72 : 0);
+      const py = o.y + a.y + floatUp(p.kind);
       const d = Math.hypot(px - wx, py - wy);
       if (d < bd) {
         bd = d;
@@ -453,7 +453,7 @@ export class Bench implements Screen {
     const cam = this.cam ?? this.targetCam();
     this.cam = cam;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    drawBackdrop(ctx, cam, t);
+    drawBackdrop(ctx, cam, t, this.level.world);
     worldTransform(ctx, cam, dpr);
     this.drawBoard(ctx, t, false);
     drawLevel(ctx, this.level, t, { delivered: false, letterGot: false });
@@ -636,7 +636,7 @@ export class Bench implements Screen {
       const pin = d.y > this.trayTop ? null : this.pinAt(w.x, w.y, 0.36);
       const ok = pin && !partProblem(this.bp, this.level.kit, d.part.kind, pin, d.index !== null ? this.bp.parts[d.index] : undefined);
       const at = ok && pin ? { x: o.x + pin[0] * GRID, y: o.y + pin[1] * GRID } : w;
-      drawPart(ctx, d.part.kind, at.x, at.y + (d.part.kind === 'lantern' ? 0.72 : 0), d.part.dir, 0, { t, flame: 1, ghost: !ok, bad: !ok && !!pin });
+      drawPart(ctx, d.part.kind, at.x, at.y + floatUp(d.part.kind), d.part.dir, 0, { t, flame: 1, ghost: !ok, bad: !ok && !!pin });
     }
   }
 

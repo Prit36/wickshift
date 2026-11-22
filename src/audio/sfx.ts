@@ -1,6 +1,17 @@
 // Synthesized sound: no assets to load, nothing blocks play if audio is unavailable.
 
 const PENTA = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24];
+/** Each world gets its own chord walk and arpeggio. */
+const WORLD_ROOTS = [
+  [0, -3, -7, -5],
+  [0, -5, -2, -7],
+  [0, 5, 3, -2],
+];
+const WORLD_ARPS = [
+  [0, 7, 12, 16, 12, 7, 4, 7],
+  [0, 4, 7, 11, 14, 11, 7, 4],
+  [0, 3, 7, 10, 12, 10, 7, 3],
+];
 
 export class Sfx {
   ctx: AudioContext | null = null;
@@ -14,6 +25,7 @@ export class Sfx {
   /** 0..1: how tense the music is (a fragile flame). */
   intensity = 0;
   boss = false;
+  world = 0;
   muted = false;
 
   unlock(): void {
@@ -139,6 +151,9 @@ export class Sfx {
       this.tone(2400 + Math.random() * 300, 0.02, 'square', 0.018);
     }
   }
+  umbrella(on: boolean, speed: number): void {
+    this.loop('umbrella', on, 0.05 + Math.min(0.08, speed * 0.012), 600 + speed * 60, 0.5, 'lowpass');
+  }
   stopLoops(): void {
     for (const k of this.loops.keys()) this.loop(k, false, 0, 1000);
   }
@@ -181,6 +196,30 @@ export class Sfx {
     }
     this.tone(180, 0.28, 'triangle', 0.2, 0, 620);
     this.tone(90, 0.12, 'sine', 0.2, 0, 50);
+  }
+  /** Thread whips out; a click when it catches. */
+  hook(hit: boolean): void {
+    this.burst(0.12, 0.14, 2600, 1.4, 'bandpass', 0, 5200);
+    if (hit) {
+      this.tone(1900, 0.05, 'square', 0.07, 0.08);
+      this.tone(1300, 0.06, 'triangle', 0.08, 0.1);
+    } else this.tone(300, 0.1, 'sine', 0.05, 0.08, 200);
+  }
+  unhook(): void {
+    this.tone(1500, 0.05, 'triangle', 0.06, 0, 700);
+  }
+  /** The lamp drinks a candle's flame. */
+  candle(): void {
+    this.burst(0.3, 0.12, 900, 0.8, 'bandpass', 0, 2400);
+    [0, 4, 7].forEach((k, i) => this.tone(this.note(12 + k), 0.18, 'sine', 0.09, i * 0.04));
+  }
+  pop(): void {
+    this.burst(0.09, 0.4, 1800, 0.7, 'highpass');
+    this.tone(220, 0.08, 'square', 0.08, 0, 80);
+  }
+  bounce(): void {
+    this.tone(140, 0.18, 'sine', 0.18, 0, 260);
+    this.burst(0.05, 0.06, 400, 1, 'lowpass');
   }
   letter(): void {
     [12, 16, 19, 24].forEach((s, i) => this.tone(this.note(s), 0.14, 'triangle', 0.12, i * 0.05));
@@ -238,10 +277,10 @@ export class Sfx {
       const b = this.beat++;
       const d = this.nextBeat - ctx.currentTime;
       const bar = Math.floor(b / 8) % 4;
-      const roots = this.boss ? [0, -4, -7, -2] : [0, -3, -7, -5];
+      const roots = this.boss ? [0, -4, -7, -2] : WORLD_ROOTS[this.world % WORLD_ROOTS.length];
       const root = roots[bar];
       if (b % 8 === 0 || b % 8 === 3 || b % 8 === 6) this.tone(this.note(root - 12) / 2, 0.25, 'triangle', 0.35, d, undefined, this.music);
-      const arp = this.boss ? [0, 7, 12, 15, 12, 7, 3, 7] : [0, 7, 12, 16, 12, 7, 4, 7];
+      const arp = this.boss ? [0, 7, 12, 15, 12, 7, 3, 7] : WORLD_ARPS[this.world % WORLD_ARPS.length];
       if (b % 2 === 0 || bar === 3) this.tone(this.note(root + arp[b % 8]), 0.14, 'square', 0.04, d, undefined, this.music);
       // a fragile flame brings in a second voice and busier hats
       if (k > 0.55 && b % 2 === 1) this.tone(this.note(root + arp[(b + 3) % 8] + 12), 0.1, 'triangle', 0.035 * k, d, undefined, this.music);

@@ -9,6 +9,7 @@ export const LEVELS: LevelDef[] = [
   {
     id: 'first-light',
     num: 1,
+    world: 0,
     name: 'First Light',
     ask: 'Pin two buttons on as wheels, then let it roll.',
     area: { cols: 6, rows: 3 },
@@ -48,6 +49,7 @@ export const LEVELS: LevelDef[] = [
   {
     id: 'ruler-rise',
     num: 2,
+    world: 0,
     name: 'Ruler Rise',
     ask: 'The window is up the ruler. Clockwork Keys drive. Where does the heavy lamp go?',
     area: { cols: 7, rows: 4 },
@@ -75,6 +77,7 @@ export const LEVELS: LevelDef[] = [
   {
     id: 'inkwell',
     num: 3,
+    world: 0,
     name: 'The Inkwell',
     ask: 'Too wide to drive across. Match Rockets push the way they point, and burn your flame.',
     area: { cols: 7, rows: 4 },
@@ -104,6 +107,7 @@ export const LEVELS: LevelDef[] = [
   {
     id: 'top-shelf',
     num: 4,
+    world: 0,
     name: 'Top Shelf',
     ask: 'The window is on the shelf above. Heat Sky Lanterns to rise; the draught up there drifts them.',
     area: { cols: 7, rows: 4 },
@@ -130,6 +134,7 @@ export const LEVELS: LevelDef[] = [
   {
     id: 'dominoes',
     num: 5,
+    world: 0,
     name: 'Dominoes',
     ask: 'Two dominoes stand in the way. Peg Springs kick off whatever their foot touches, and cost no flame.',
     area: { cols: 6, rows: 3 },

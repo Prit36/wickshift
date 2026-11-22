@@ -13,6 +13,8 @@ export function starsFor(L: LevelDef, r: Run, bp: Blueprint): Stars {
   if (s.kind === 'flame') third = r.flame >= s.value - 1e-9;
   else if (s.kind === 'time') third = r.time <= s.value;
   else if (s.kind === 'max' && s.part) third = used(bp)[s.part] <= s.value;
+  else if (s.kind === 'nofire') third = !r.fireUsed;
+  else if (s.kind === 'candles') third = r.candlesUsed.filter(Boolean).length >= s.value;
   return [true, r.letterGot, third];
 }
 
