@@ -1,81 +1,87 @@
+// The flame: variety, repeats, levels, fragility, and how a post is scored in order.
 import { describe, expect, it } from 'vitest';
-import { Flame, BASE_TOLERANCE, FULL_FLAME, cartSpecFor, type StampId } from '../src/sim/rules';
-import { Shift } from '../src/sim/shift';
-
-const flame = (...s: StampId[]) => {
-  const f = new Flame(new Set(s));
-  f.reset(1);
-  return f;
-};
+import { BASE_TOLERANCE, FRAGILE_SHARE } from '../src/sim/rules';
+import { freshLevels } from '../src/sim/tricks';
+import { ctx, flame } from './helpers';
 
 describe('flame', () => {
-  it('new tricks add a spark, repeats lose value', () => {
+  it('a new trick adds a spark; a repeat adds none and is worth less', () => {
     const f = flame();
-    const a = f.award('Backflip', 200);
-    const b = f.award('Backflip', 200);
+    const a = f.award('flip', 'Backflip', 200, 'first');
+    const b = f.award('flip', 'Backflip', 200, 'first');
     expect(a.sparks).toBe(1);
     expect(b.sparks).toBe(0);
     expect(b.heat).toBe(120);
     expect(f.sparks).toBe(2);
   });
 
-  it("Sorter's Eye removes the repeat penalty", () => {
-    const f = flame('sorter');
-    f.award('Air', 100);
-    expect(f.award('Air', 100).heat).toBe(100);
+  it('postcard levels add heat and a spark', () => {
+    const lv = freshLevels();
+    lv.flip = 3;
+    const p = flame([], lv).award('flip', 'Backflip', 200, 'first');
+    expect(p.heat).toBe(400);
+    expect(p.sparks).toBe(3);
   });
 
-  it('Backhand triples backflips and snuffs sparks on a frontflip', () => {
-    const f = flame('backhand');
-    expect(f.award('Backflip', 200).heat).toBe(600);
-    f.award('Big Air', 50, true, 'Air');
-    expect(f.sparks).toBe(3);
-    f.award('Frontflip', 200);
-    expect(f.sparks).toBe(1);
-  });
-
-  it('a bigger flame survives softer landings, Tempered Glass ignores size', () => {
+  it('fragility is measured against the delivery target', () => {
     const f = flame();
-    expect(f.tolerance(1)).toBe(BASE_TOLERANCE);
-    f.heat = FULL_FLAME;
-    expect(f.tolerance(1)).toBeLessThan(BASE_TOLERANCE);
-    const g = flame('tempered');
-    g.heat = FULL_FLAME;
-    expect(g.tolerance(1)).toBe(BASE_TOLERANCE);
+    f.heat = 300;
+    f.sparks = 2;
+    expect(f.fragility(1000)).toBeCloseTo(600 / (1000 * FRAGILE_SHARE));
+    expect(f.fragility(100000)).toBeLessThan(0.02);
+    expect(f.tolerance(1, 1000)).toBeLessThan(BASE_TOLERANCE);
+    expect(flame().tolerance(1, 1000)).toBe(BASE_TOLERANCE);
   });
 
-  it('post value is heat × sparks with window and stamp multipliers', () => {
-    const f = flame('firstClass', 'airmail');
+  it('post is heat × sparks, a high window doubles sparks first', () => {
+    const f = flame();
     f.heat = 100;
     f.sparks = 3;
-    expect(f.postValue({ high: false, airborne: false }).value).toBe(300);
-    expect(f.postValue({ high: true, airborne: false }).value).toBe(1200);
-    expect(f.postValue({ high: true, airborne: true }).value).toBe(2400);
+    expect(f.post(ctx()).value).toBe(300);
+    const r = f.post(ctx({ high: true }));
+    expect(r.value).toBe(600);
+    expect(r.steps[0]).toMatchObject({ id: 'window', kind: 'xsparks', sparks: 6 });
   });
 
-  it('parts change the cart', () => {
-    expect(cartSpecFor(['reels']).spec.wheelR).toBeGreaterThan(cartSpecFor([]).spec.wheelR);
-    expect(cartSpecFor(['bedspring']).tolerance).toBeGreaterThan(1);
-  });
-});
-
-describe('shift', () => {
-  it('replays identically from the same inputs', () => {
-    const play = () => {
-      const sh = new Shift({ seed: 7, shift: 2, target: 1000, stamps: [], parts: [], glasses: 3, rule: null });
-      for (let t = 0; t < 60 * 20; t++) sh.step({ gas: t % 200 < 170, brake: t % 200 >= 190, post: t % 30 === 0 });
-      return [sh.posted, sh.sim.pos.x.toFixed(6), sh.tricks, sh.glasses];
-    };
-    expect(play()).toEqual(play());
+  it('stamp order matters: add before you multiply', () => {
+    const a = flame(['wax', 'airmail']);
+    const b = flame(['airmail', 'wax']);
+    for (const f of [a, b]) {
+      f.heat = 100;
+      f.sparks = 2;
+    }
+    expect(a.post(ctx({ airborne: true })).value).toBe(100 * (2 + 3) * 2);
+    expect(b.post(ctx({ airborne: true })).value).toBe(100 * (2 * 2 + 3));
   });
 
-  it('posting with no flame does not light the window', () => {
-    const sh = new Shift({ seed: 3, shift: 1, target: 1000, stamps: [], parts: [], glasses: 3, rule: null });
-    const w = sh.course.windows.find((x) => !x.final)!;
-    sh.sim.spawn(w.x, w.y);
-    sh.flame.reset(1);
-    sh.step({ gas: false, brake: false, post: true });
-    expect(sh.lit.has(w.id)).toBe(false);
-    expect(sh.events.some((e) => e.type === 'emptyPost')).toBe(true);
+  it('the post lists each step in album order with running totals', () => {
+    const f = flame(['bigEnvelope', 'wax', 'midnightOil']);
+    f.heat = 50;
+    const r = f.post(ctx());
+    expect(r.steps.map((s) => [s.slot, s.id, s.heat, s.sparks])).toEqual([
+      [0, 'bigEnvelope', 300, 1],
+      [1, 'wax', 300, 4],
+      [2, 'midnightOil', 300, 12],
+    ]);
+    expect(r.value).toBe(3600);
+  });
+
+  it('Carbon Copy copies the stamp to its right and nothing at the end', () => {
+    const f = flame(['carbon', 'wax']);
+    f.heat = 10;
+    const r = f.post(ctx());
+    expect(r.steps.map((s) => s.slot)).toEqual([0, 1]);
+    expect(r.value).toBe(10 * 7);
+    const g = flame(['wax', 'carbon']);
+    g.heat = 10;
+    expect(g.post(ctx()).value).toBe(10 * 4);
+  });
+
+  it('a post never resets the flame by itself', () => {
+    const f = flame(['wax']);
+    f.heat = 10;
+    f.post(ctx());
+    expect(f.heat).toBe(10);
+    expect(f.sparks).toBe(1);
   });
 });

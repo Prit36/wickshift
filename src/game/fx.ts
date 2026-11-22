@@ -141,10 +141,19 @@ export class Fx {
       const alpha = k > 0.75 ? 1 - (k - 0.75) / 0.25 : 1;
       const fs = Math.round(30 * p.size * scale * pop);
       ctx.globalAlpha = alpha;
-      ctx.save();
-      ctx.translate(s.x, s.y);
-      ctx.rotate(this.reduced ? 0 : Math.sin(p.t * 9) * 0.04 * (1 - k));
       ctx.font = `700 ${fs}px ${FONT}`;
+      // keep the label on screen (narrow phones put pops beside the cart off the edge)
+      let half = ctx.measureText(p.text.toUpperCase()).width / 2;
+      if (p.sub) {
+        ctx.font = `700 ${Math.round(fs * 0.62)}px ${FONT}`;
+        half = Math.max(half, ctx.measureText(p.sub).width / 2);
+        ctx.font = `700 ${fs}px ${FONT}`;
+      }
+      const pad = 8 + half;
+      const sx = cam.W > pad * 2 ? Math.max(pad, Math.min(cam.W - pad, s.x)) : s.x;
+      ctx.save();
+      ctx.translate(sx, s.y);
+      ctx.rotate(this.reduced ? 0 : Math.sin(p.t * 9) * 0.04 * (1 - k));
       ctx.lineJoin = 'round';
       ctx.lineWidth = Math.max(3, fs * 0.2);
       ctx.strokeStyle = C.ink;

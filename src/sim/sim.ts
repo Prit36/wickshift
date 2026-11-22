@@ -1,8 +1,10 @@
 // Cart physics. Planck world with the course as static chains and a two-wheel
 // cart: a matchbox chassis, a lamp and a moth on top (both fragile), wheel joints
 // with springs, rear-wheel drive and direct air control.
+// Course features live here too: one-way pencil rails, knock-over sugar cubes,
+// and (for one Inspector) a kinematic cat's paw.
 import * as planck from 'planck';
-import { groundAt, type Course } from './terrain';
+import { groundAt, railAt, type Course, type Feature } from './terrain';
 
 export const GRAVITY = 15;
 
@@ -19,6 +21,8 @@ export interface CartSpec {
   suspHz: number;
   suspDamp: number;
   restitution: number;
+  /** Chassis density multiplier (Heavy Sack). */
+  heavy: number;
 }
 
 export const BASE_CART: CartSpec = {
@@ -32,6 +36,7 @@ export const BASE_CART: CartSpec = {
   suspHz: 4.2,
   suspDamp: 0.55,
   restitution: 0.05,
+  heavy: 1,
 };
 
 export interface DriveInput {
@@ -41,11 +46,16 @@ export interface DriveInput {
 
 export type SimEvent =
   | { type: 'takeoff' }
-  | { type: 'land'; impact: number; belly: boolean; x: number; y: number }
-  | { type: 'crash'; reason: 'lamp' | 'moth' | 'fall'; x: number; y: number };
+  | { type: 'land'; impact: number; belly: boolean; x: number; y: number; rail: boolean }
+  | { type: 'crash'; reason: 'lamp' | 'moth' | 'fall'; x: number; y: number }
+  | { type: 'smash'; x: number; y: number }
+  /** The cat's paw hit the cart: knocked back, not broken. */
+  | { type: 'swat'; x: number; y: number };
 
+type Role = 'chassis' | 'lamp' | 'moth' | 'wheelR' | 'wheelF' | 'ground' | 'rail' | 'cube' | 'paw';
 interface Tag {
-  role: 'chassis' | 'lamp' | 'moth' | 'wheelR' | 'wheelF' | 'ground';
+  role: Role;
+  id?: number;
 }
 
 const CH_HW = 0.95;
@@ -54,6 +64,7 @@ export const LAMP_OFF = { x: 0.12, y: 0.62 };
 export const MOTH_OFF = { x: -0.5, y: 0.5 };
 const AXLE_R = { x: -0.68, y: -0.28 };
 const AXLE_F = { x: 0.7, y: -0.28 };
+export const CUBE = 0.5;
 
 export interface Pose {
   x: number;
@@ -66,6 +77,8 @@ export interface CartPose {
   rear: Pose;
   front: Pose;
 }
+
+type Rail = Extract<Feature, { kind: 'rail' }>;
 
 export class Sim {
   readonly world: planck.World;
@@ -82,41 +95,117 @@ export class Sim {
   rearTouch = false;
   frontTouch = false;
   bellyTouch = false;
+  /** A wheel is on a pencil rail. */
+  railTouch = false;
   airborne = false;
   crashed = false;
   private fragileHit: { reason: 'lamp' | 'moth'; x: number; y: number } | null = null;
+  private pawHit: { x: number; y: number } | null = null;
+  /** Ticks during which the paw passes through the cart (after a swat). */
+  pawGrace = 0;
   private prevVel = new planck.Vec2(0, 0);
   prevPose: CartPose | null = null;
   /** Live tilt input in the air, -1..1, for the lamp-on-rail animation. */
   lean = 0;
   throttle = 0;
-  /** World-space wind pushing the cart (Supervisor rule). */
+  /** World-space wind pushing the cart (Inspector rule). */
   wind = 0;
   gripMul = 1;
+  /** Ticks of striker boost left. */
+  boostT = 0;
+  private rails: Rail[] = [];
+  /** Per rail: is the cart riding on top of it, or passing underneath? */
+  private railMode = new Map<number, 'top' | 'under'>();
+  cubes: { body: planck.Body; hit: boolean; stack: number }[] = [];
+  /** Cubes struck this step, thrown once the world step is done. */
+  private struck: number[] = [];
+  paw: planck.Body | null = null;
 
   constructor(readonly course: Course, spec: CartSpec) {
     this.spec = spec;
     this.world = new planck.World({ gravity: new planck.Vec2(0, -GRAVITY) });
     for (const isl of course.islands) {
       const bottom = course.killY - 4;
-      const verts = [
-        new planck.Vec2(isl[0].x, bottom),
-        ...isl.map((p) => new planck.Vec2(p.x, p.y)),
-        new planck.Vec2(isl[isl.length - 1].x, bottom),
-      ];
+      const verts = [new planck.Vec2(isl[0].x, bottom), ...isl.map((p) => new planck.Vec2(p.x, p.y)), new planck.Vec2(isl[isl.length - 1].x, bottom)];
       const body = this.world.createBody({ type: 'static' });
       body.createFixture({ shape: new planck.Chain(verts, false), friction: 1, userData: { role: 'ground' } satisfies Tag });
     }
+    for (const f of course.features) {
+      if (f.kind === 'rail') {
+        this.rails.push(f);
+        const body = this.world.createBody({ type: 'static' });
+        body.createFixture({ shape: new planck.Edge(new planck.Vec2(f.x0, f.y0), new planck.Vec2(f.x1, f.y1)), friction: 0.7, userData: { role: 'rail', id: f.id } satisfies Tag });
+      } else if (f.kind === 'stack') {
+        for (let c = 0; c < f.cols; c++)
+          for (let r = 0; r < f.rows; r++) {
+            const body = this.world.createBody({ type: 'dynamic', position: new planck.Vec2(f.x + c * CUBE * 1.02 + CUBE / 2, f.y + r * CUBE * 1.0 + CUBE / 2 + 0.005), allowSleep: true, awake: false });
+            body.createFixture({ shape: new planck.Box(CUBE / 2, CUBE / 2), density: 0.22, friction: 0.6, userData: { role: 'cube', id: this.cubes.length } satisfies Tag });
+            this.cubes.push({ body, hit: false, stack: f.id });
+          }
+      }
+    }
     this.world.on('begin-contact', (c) => this.onBegin(c));
+    this.world.on('pre-solve', (c) => this.onPreSolve(c));
     this.spawn(course.startX, course.startY);
   }
 
-  private onBegin(c: planck.Contact): void {
-    const a = c.getFixtureA().getUserData() as Tag | null;
-    const b = c.getFixtureB().getUserData() as Tag | null;
+  private static tags(c: planck.Contact): [Tag | null, Tag | null] {
+    return [c.getFixtureA().getUserData() as Tag | null, c.getFixtureB().getUserData() as Tag | null];
+  }
+
+  private isCart(t: Tag | null): boolean {
+    return !!t && (t.role === 'chassis' || t.role === 'lamp' || t.role === 'moth' || t.role === 'wheelR' || t.role === 'wheelF');
+  }
+
+  private onPreSolve(c: planck.Contact): void {
+    const [a, b] = Sim.tags(c);
     if (!a || !b) return;
-    const pair = a.role === 'ground' ? b : b.role === 'ground' ? a : null;
-    if (!pair) return;
+    // struck sugar cubes pass through the cart: we throw them ourselves
+    const cube = a.role === 'cube' ? a : b.role === 'cube' ? b : null;
+    if (cube) {
+      if (this.isCart(cube === a ? b : a) && this.cubes[cube.id!]?.hit) c.setEnabled(false);
+      return;
+    }
+    const paw = a.role === 'paw' ? a : b.role === 'paw' ? b : null;
+    if (paw) {
+      if (this.pawGrace > 0 && this.isCart(paw === a ? b : a)) c.setEnabled(false);
+      return;
+    }
+    const rail = a.role === 'rail' ? a : b.role === 'rail' ? b : null;
+    if (!rail) return;
+    const other = rail === a ? b : a;
+    if (this.isCart(other) && this.railMode.get(rail.id!) !== 'top') c.setEnabled(false);
+  }
+
+  private onBegin(c: planck.Contact): void {
+    const [a, b] = Sim.tags(c);
+    if (!a || !b) return;
+    // sugar cubes knocked by the cart
+    const cube = a.role === 'cube' ? a : b.role === 'cube' ? b : null;
+    if (cube) {
+      const other = cube === a ? b : a;
+      const cb = this.cubes[cube.id!];
+      if (this.isCart(other) && cb && !cb.hit) {
+        cb.hit = true;
+        this.struck.push(cube.id!);
+        const p = cb.body.getPosition();
+        this.events.push({ type: 'smash', x: p.x, y: p.y });
+      }
+      return;
+    }
+    const pawTag = a.role === 'paw' ? a : b.role === 'paw' ? b : null;
+    if (pawTag) {
+      const other = pawTag === a ? b : a;
+      if (this.isCart(other) && this.pawGrace <= 0 && !this.pawHit && other.role !== 'wheelR' && other.role !== 'wheelF') {
+        const p = this.chassis.getPosition();
+        this.pawHit = { x: p.x, y: p.y };
+      }
+      return;
+    }
+    const solid = (t: Tag) => t.role === 'ground' || (t.role === 'rail' && this.railMode.get(t.id!) === 'top');
+    const surf = solid(a) ? a : solid(b) ? b : null;
+    if (!surf) return;
+    const pair = surf === a ? b : a;
     if (pair.role === 'lamp' || pair.role === 'moth') {
       const p = pair.role === 'lamp' ? this.chassis.getWorldPoint(new planck.Vec2(LAMP_OFF.x, LAMP_OFF.y)) : this.chassis.getWorldPoint(new planck.Vec2(MOTH_OFF.x, MOTH_OFF.y));
       if (!this.fragileHit) this.fragileHit = { reason: pair.role, x: p.x, y: p.y };
@@ -125,6 +214,8 @@ export class Sim {
 
   /** (Re)build the cart standing on the ground at x. */
   spawn(x: number, yHint: number, vx = 0): void {
+    this.pawHit = null;
+    this.pawGrace = 0;
     for (const b of [this.chassis, this.rear, this.front]) if (b) this.world.destroyBody(b);
     const s = this.spec;
     const gy = groundAt(this.course, x) ?? yHint;
@@ -135,7 +226,7 @@ export class Sim {
     const cx = x;
     const cy = (gyR + gyF) / 2 + lift;
     const ch = this.world.createBody({ type: 'dynamic', position: new planck.Vec2(cx, cy), angle: ang, angularDamping: 0.6 });
-    ch.createFixture({ shape: new planck.Box(CH_HW, CH_HH), density: 3.2, friction: 0.5, userData: { role: 'chassis' } satisfies Tag });
+    ch.createFixture({ shape: new planck.Box(CH_HW, CH_HH), density: 3.2 * s.heavy, friction: 0.5, userData: { role: 'chassis' } satisfies Tag });
     ch.createFixture({ shape: new planck.Circle(new planck.Vec2(LAMP_OFF.x, LAMP_OFF.y), 0.27), density: 1.2, friction: 0.4, userData: { role: 'lamp' } satisfies Tag });
     ch.createFixture({ shape: new planck.Circle(new planck.Vec2(MOTH_OFF.x, MOTH_OFF.y), 0.25), density: 0.8, friction: 0.4, userData: { role: 'moth' } satisfies Tag });
     this.chassis = ch;
@@ -160,6 +251,8 @@ export class Sim {
     this.airborne = false;
     this.crashed = false;
     this.fragileHit = null;
+    this.boostT = 0;
+    this.railMode.clear();
     this.prevVel = new planck.Vec2(0, 0);
     this.prevPose = null;
   }
@@ -185,25 +278,56 @@ export class Sim {
   suspension(): { rear: number; front: number } {
     return { rear: this.jr.getJointTranslation(), front: this.jf.getJointTranslation() };
   }
+  get grounded(): boolean {
+    return this.rearTouch || this.frontTouch || this.bellyTouch;
+  }
 
-  private touching(b: planck.Body): boolean {
+  private touching(b: planck.Body): { any: boolean; rail: boolean } {
+    let any = false;
+    let rail = false;
     for (let e = b.getContactList(); e; e = e.next) {
       const c = e.contact;
-      if (!c.isTouching()) continue;
-      const o = e.other?.getFixtureList()?.getUserData() as Tag | null;
-      if (o && o.role === 'ground') return true;
+      if (!c.isTouching() || !c.isEnabled()) continue;
+      const fa = c.getFixtureA().getUserData() as Tag | null;
+      const fb = c.getFixtureB().getUserData() as Tag | null;
+      const o = fa && this.isCart(fa) ? fb : fa;
+      if (!o) continue;
+      if (o.role === 'ground' || o.role === 'paw') any = true;
+      if (o.role === 'rail' && this.railMode.get(o.id!) === 'top') {
+        any = true;
+        rail = true;
+      }
     }
-    return false;
+    return { any, rail };
   }
   private bellyTouching(): boolean {
     for (let e = this.chassis.getContactList(); e; e = e.next) {
       const c = e.contact;
-      if (!c.isTouching()) continue;
+      if (!c.isTouching() || !c.isEnabled()) continue;
       const fa = c.getFixtureA().getUserData() as Tag | null;
       const fb = c.getFixtureB().getUserData() as Tag | null;
-      if ((fa?.role === 'chassis' && fb?.role === 'ground') || (fb?.role === 'chassis' && fa?.role === 'ground')) return true;
+      const g = (t: Tag | null) => !!t && (t.role === 'ground' || t.role === 'paw' || (t.role === 'rail' && this.railMode.get(t.id!) === 'top'));
+      if ((fa?.role === 'chassis' && g(fb)) || (fb?.role === 'chassis' && g(fa))) return true;
     }
     return false;
+  }
+
+  /** Decide, per rail, whether the cart is up on it or passing below. */
+  private updateRails(): void {
+    const p = this.chassis.getPosition();
+    for (const r of this.rails) {
+      const y = railAt(r, Math.max(r.x0, Math.min(r.x1, p.x)))!;
+      if (p.x < r.x0 - 1.2 || p.x > r.x1 + 1.2) {
+        this.railMode.delete(r.id);
+        continue;
+      }
+      // lowest point of either wheel
+      const low = Math.min(this.rear.getPosition().y - this.spec.wheelR, this.front.getPosition().y - this.spec.frontR);
+      const mode = this.railMode.get(r.id);
+      if (mode === 'top') continue;
+      if (low > y - 0.08) this.railMode.set(r.id, 'top');
+      else this.railMode.set(r.id, 'under');
+    }
   }
 
   step(input: DriveInput, dt: number): void {
@@ -214,13 +338,16 @@ export class Sim {
       return;
     }
     this.prevPose = this.pose();
+    this.updateRails();
     const s = this.spec;
-    const grounded = this.rearTouch || this.frontTouch || this.bellyTouch;
+    const grounded = this.grounded;
+    const boost = this.boostT > 0;
+    if (boost) this.boostT--;
     // Drive
     if (input.gas && !input.brake) {
       this.jr.enableMotor(true);
-      this.jr.setMaxMotorTorque(s.torque);
-      this.jr.setMotorSpeed(-s.spin);
+      this.jr.setMaxMotorTorque(s.torque * (boost ? 1.8 : 1));
+      this.jr.setMotorSpeed(-s.spin * (boost ? 1.45 : 1));
       this.jf.enableMotor(false);
       this.throttle = Math.min(1, this.throttle + 0.1);
     } else if (input.brake) {
@@ -255,7 +382,7 @@ export class Sim {
       }
     } else if (grounded && tilt !== 0) {
       // A little body English on the ground helps wheelies and holding the nose down.
-      this.chassis.applyTorque(tilt * 9, true);
+      this.chassis.applyTorque(tilt * 9 * s.heavy, true);
     }
     if (this.wind !== 0) this.chassis.applyForceToCenter(new planck.Vec2(this.wind, 0), true);
 
@@ -264,22 +391,46 @@ export class Sim {
     this.world.step(dt);
     this.tick++;
 
-    this.rearTouch = this.touching(this.rear);
-    this.frontTouch = this.touching(this.front);
+    // throw struck cubes up and ahead, and pay a little speed for each
+    if (this.struck.length) {
+      const v = this.chassis.getLinearVelocity();
+      for (const id of this.struck) {
+        const cb = this.cubes[id].body;
+        const h = Math.sin(id * 12.9898 + 4.1) * 0.5 + 0.5;
+        const h2 = Math.sin(id * 78.233 + 1.3) * 0.5 + 0.5;
+        cb.setAwake(true);
+        cb.setLinearVelocity(new planck.Vec2(v.x * (0.9 + h * 0.5) + 1, 4 + h2 * 5 + Math.max(0, v.y)));
+        cb.setAngularVelocity((h - 0.5) * 18);
+      }
+      this.setAll(v.x * Math.pow(0.985, this.struck.length), v.y);
+      this.struck.length = 0;
+    }
+    const tr = this.touching(this.rear);
+    const tf = this.touching(this.front);
+    this.rearTouch = tr.any;
+    this.frontTouch = tf.any;
+    this.railTouch = tr.rail || tf.rail;
     this.bellyTouch = this.bellyTouching();
-    const nowGrounded = this.rearTouch || this.frontTouch || this.bellyTouch;
+    const nowGrounded = this.grounded;
     if (nowGrounded) {
       if (this.airborne) {
         const p = this.chassis.getPosition();
         const x = p.x;
-        const g1 = groundAt(this.course, x - 0.3) ?? p.y;
-        const g2 = groundAt(this.course, x + 0.3) ?? p.y;
+        let g1 = groundAt(this.course, x - 0.3) ?? p.y;
+        let g2 = groundAt(this.course, x + 0.3) ?? p.y;
+        if (this.railTouch) {
+          const r = this.rails.find((r) => x >= r.x0 - 1 && x <= r.x1 + 1);
+          if (r) {
+            g1 = railAt(r, Math.max(r.x0, Math.min(r.x1, x - 0.3)))!;
+            g2 = railAt(r, Math.max(r.x0, Math.min(r.x1, x + 0.3)))!;
+          }
+        }
         const nx = -(g2 - g1);
         const ny = 0.6;
         const nl = Math.hypot(nx, ny);
         const impact = Math.max(0, -(this.prevVel.x * nx + this.prevVel.y * ny) / nl);
         const belly = this.bellyTouch && !(this.rearTouch && this.frontTouch);
-        this.events.push({ type: 'land', impact, belly, x, y: Math.min(g1, g2) });
+        this.events.push({ type: 'land', impact, belly, x, y: Math.min(g1, g2), rail: this.railTouch });
       }
       this.airTicks = 0;
       this.airborne = false;
@@ -291,7 +442,17 @@ export class Sim {
       }
     }
 
-    if (this.fragileHit) {
+    if (this.pawGrace > 0) this.pawGrace--;
+    if (this.pawHit) {
+      const h = this.pawHit;
+      this.pawHit = null;
+      this.pawGrace = 70;
+      this.fragileHit = null;
+      // bounced back and up, a little spin
+      this.setAll(-5, 6);
+      this.chassis.setAngularVelocity(1.2);
+      this.events.push({ type: 'swat', x: h.x, y: h.y });
+    } else if (this.fragileHit) {
       this.crashed = true;
       this.events.push({ type: 'crash', reason: this.fragileHit.reason, x: this.fragileHit.x, y: this.fragileHit.y });
       this.fragileHit = null;
@@ -300,6 +461,47 @@ export class Sim {
       const p = this.chassis.getPosition();
       this.events.push({ type: 'crash', reason: 'fall', x: p.x, y: p.y });
     }
+  }
+
+  private setAll(vx: number, vy: number): void {
+    for (const b of [this.chassis, this.rear, this.front]) b.setLinearVelocity(new planck.Vec2(vx, vy));
+  }
+
+  /** Mousetrap: fling the cart on a fixed arc. */
+  launch(vx: number, vy: number): void {
+    this.setAll(vx, vy);
+    this.chassis.setAngularVelocity(0);
+    this.airborne = true;
+    this.airTicks = 5;
+    this.events.push({ type: 'takeoff' });
+  }
+
+  /** Striker strip: kick the cart up to at least `v` along its heading. */
+  boost(v: number, ticks = 80): void {
+    const a = this.angle;
+    const cur = this.chassis.getLinearVelocity();
+    const along = cur.x * Math.cos(a) + cur.y * Math.sin(a);
+    if (along < v) this.setAll(v * Math.cos(a), v * Math.sin(a));
+    this.rear.setAngularVelocity(-v / this.spec.wheelR);
+    this.front.setAngularVelocity(-v / this.spec.frontR);
+    this.boostT = ticks;
+  }
+
+  /** Thumbtack: a jolt up and a loss of speed. */
+  hop(): void {
+    const v = this.chassis.getLinearVelocity();
+    this.setAll(v.x * 0.6, Math.max(v.y, 0) + 4.5);
+    this.chassis.setAngularVelocity(this.chassis.getAngularVelocity() + 1.5);
+  }
+
+  /** The cat's paw: a kinematic block an Inspector moves around. */
+  enablePaw(): planck.Body {
+    if (this.paw) return this.paw;
+    const b = this.world.createBody({ type: 'kinematic', position: new planck.Vec2(0, this.course.maxY + 40) });
+    b.createFixture({ shape: new planck.Box(0.9, 0.55), friction: 0.8, userData: { role: 'paw' } satisfies Tag });
+    b.createFixture({ shape: new planck.Box(0.6, 6, new planck.Vec2(0, 6.4), 0), friction: 0.8, userData: { role: 'paw' } satisfies Tag });
+    this.paw = b;
+    return b;
   }
 
   /** Roll gently to a stop (after the shift ends) without nose-diving. */
